@@ -24,6 +24,10 @@ log         = "0.4"
 env_logger  = "0.11"
 zeroize     = { version = "1", features = ["derive"] }
 libc        = "0.2"
+aes-gcm     = "0.10"
+hmac        = "0.12"
+zbus        = { version = "4", features = ["tokio", "blocking"] }
+tokio       = { version = "1", features = ["rt"] }
 
 # tss-esapi requires libtss2-esapi system headers.
 # Made optional so `cargo check` works without TPM2 development libraries.

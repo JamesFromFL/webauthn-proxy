@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Incoming registration request forwarded from the extension.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRequest {
     pub request_id:      String,
@@ -28,12 +28,12 @@ pub struct CreateRequest {
 
 /// Full create response — the `response` field is returned to the extension
 /// and stringified as the `responseJson` argument to completeCreateRequest.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateResponse {
     pub response: PublicKeyCredentialCreate,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicKeyCredentialCreate {
     pub id:                       String,   // base64url credential ID
@@ -45,7 +45,7 @@ pub struct PublicKeyCredentialCreate {
     pub client_extension_results: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttestationResponse {
     pub client_data_json:   String,         // base64url
@@ -58,7 +58,7 @@ pub struct AttestationResponse {
 // ---------------------------------------------------------------------------
 
 /// Incoming authentication request forwarded from the extension.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetRequest {
     pub request_id:        String,
@@ -69,7 +69,7 @@ pub struct GetRequest {
     pub allow_credentials: Vec<AllowCredential>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AllowCredential {
     pub id:    String,   // base64url
     #[serde(rename = "type", default)]
@@ -78,12 +78,12 @@ pub struct AllowCredential {
 
 /// Full get response — the `response` field is stringified as `responseJson`
 /// for completeGetRequest.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GetResponse {
     pub response: PublicKeyCredentialGet,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicKeyCredentialGet {
     pub id:                       String,   // base64url credential ID
@@ -95,7 +95,7 @@ pub struct PublicKeyCredentialGet {
     pub client_extension_results: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssertionResponse {
     pub client_data_json:    String,         // base64url

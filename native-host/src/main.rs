@@ -11,9 +11,11 @@ use log::{debug, error, info};
 
 mod authentication;
 mod crypto;
+mod dbus_client;
 mod pam;
 mod protocol;
 mod registration;
+mod session;
 mod tpm;
 
 // ---------------------------------------------------------------------------
@@ -76,7 +78,7 @@ fn error_response(request_id: &str, code: &str, message: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-fn dispatch(raw: &[u8]) -> Vec<u8> {
+fn dispatch(raw: &[u8], session: &session::DaemonSession) -> Vec<u8> {
     let envelope: serde_json::Value = match serde_json::from_slice(raw) {
         Ok(v) => v,
         Err(e) => {
@@ -109,7 +111,7 @@ fn dispatch(raw: &[u8]) -> Vec<u8> {
                     return error_response(&request_id, "bad_request", &format!("{e}"));
                 }
             };
-            match registration::handle_create(req) {
+            match registration::handle_create(req, session) {
                 Ok(resp)  => wrap_ok(&request_id, resp),
                 Err(e)    => { error!("Registration error: {e}"); error_response(&request_id, "registration_error", &e) }
             }
@@ -123,7 +125,7 @@ fn dispatch(raw: &[u8]) -> Vec<u8> {
                     return error_response(&request_id, "bad_request", &format!("{e}"));
                 }
             };
-            match authentication::handle_get(req) {
+            match authentication::handle_get(req, session) {
                 Ok(resp)  => wrap_ok(&request_id, resp),
                 Err(e)    => { error!("Authentication error: {e}"); error_response(&request_id, "authentication_error", &e) }
             }
@@ -155,6 +157,15 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
+    let session = match session::DaemonSession::new() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to connect to daemon: {e}");
+            std::process::exit(1);
+        }
+    };
+    info!("Connected to daemon, session established");
+
     let stdin  = io::stdin();
     let stdout = io::stdout();
     let mut stdin_lock  = stdin.lock();
@@ -166,7 +177,7 @@ fn main() {
                 debug!("Received zero-length message, ignoring");
             }
             Ok(Some(bytes)) => {
-                let response = dispatch(&bytes);
+                let response = dispatch(&bytes, &session);
                 if let Err(e) = write_message(&mut stdout_lock, &response) {
                     error!("Failed to write response: {e}");
                     break;
@@ -183,5 +194,6 @@ fn main() {
         }
     }
 
+    let _ = session.client.disconnect(std::process::id());
     info!("webauthn-proxy-host exiting");
 }
