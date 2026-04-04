@@ -1,0 +1,37 @@
+[package]
+name = "webauthn-proxy-host"
+version = "0.1.0"
+edition = "2021"
+description = "Chrome Native Messaging Host for WebAuthn Proxy — PAM + TPM2 on Linux"
+license = "MIT"
+
+[[bin]]
+name = "webauthn-proxy-host"
+path = "src/main.rs"
+
+[dependencies]
+serde       = { version = "1",    features = ["derive"] }
+serde_json  = "1"
+# pam = "1" does not exist on crates.io; latest stable is 0.8.0
+pam         = "0.8"
+p256        = { version = "0.13", features = ["ecdsa"] }
+sha2        = "0.10"
+rand        = "0.8"
+# base64 0.21 uses the Engine API (URL_SAFE_NO_PAD)
+base64      = "0.21"
+hex         = "0.4"
+log         = "0.4"
+env_logger  = "0.11"
+zeroize     = { version = "1", features = ["derive"] }
+libc        = "0.2"
+
+# tss-esapi requires libtss2-esapi system headers.
+# Made optional so `cargo check` works without TPM2 development libraries.
+# Enable with: cargo build --features tpm2
+[dependencies.tss-esapi]
+version  = "7"
+optional = true
+
+[features]
+default = []
+tpm2    = ["dep:tss-esapi"]
