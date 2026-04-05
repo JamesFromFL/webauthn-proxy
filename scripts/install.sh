@@ -214,7 +214,15 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 9. Install native messaging host manifest
+# 9. Install D-Bus system policy
+# ---------------------------------------------------------------------------
+echo "==> Installing D-Bus system policy..."
+install -m 0644 "${REPO_ROOT}/scripts/com.webauthnproxy.Daemon.conf" \
+    "/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf"
+echo "    D-Bus policy installed."
+
+# ---------------------------------------------------------------------------
+# 10. Install native messaging host manifest
 # ---------------------------------------------------------------------------
 install_manifest() {
     local dest_dir="$1"
