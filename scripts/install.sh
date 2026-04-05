@@ -42,25 +42,44 @@ die() { echo "FATAL: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # Cargo detection — sudo resets PATH and loses the rustup shim
 # ---------------------------------------------------------------------------
-INVOKING_USER="${SUDO_USER:-${USER:-}}"
-CARGO=""
-for candidate in \
-    "${HOME}/.cargo/bin/cargo" \
-    "/home/${INVOKING_USER}/.cargo/bin/cargo" \
-    "${HOME}/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo" \
-    "/usr/bin/cargo" \
-    "$(which cargo 2>/dev/null || true)"; do
-    if [[ -x "${candidate}" ]]; then
-        CARGO="${candidate}"
-        break
+find_cargo() {
+    if [[ -n "${SUDO_USER}" ]]; then
+        local user_home
+        user_home=$(getent passwd "${SUDO_USER}" | cut -d: -f6)
+        for candidate in \
+            "${user_home}/.cargo/bin/cargo" \
+            "${user_home}/.rustup/toolchains/"*/bin/cargo
+        do
+            if [[ -x "${candidate}" ]]; then
+                echo "${candidate}"
+                return 0
+            fi
+        done
     fi
-done
 
-if [[ -z "${CARGO}" ]]; then
-    die "cargo not found. Install Rust via rustup.rs or run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-fi
+    for home in /home/*/; do
+        for candidate in \
+            "${home}.cargo/bin/cargo" \
+            "${home}.rustup/toolchains/"*/bin/cargo
+        do
+            if [[ -x "${candidate}" ]]; then
+                echo "${candidate}"
+                return 0
+            fi
+        done
+    done
 
-export CARGO
+    for candidate in /usr/local/bin/cargo /usr/bin/cargo; do
+        if [[ -x "${candidate}" ]]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+CARGO="$(find_cargo)" || die "cargo not found. Install Rust from rustup.rs then re-run this script."
 export PATH="$(dirname "${CARGO}"):${PATH}"
 echo "    Using cargo: ${CARGO}"
 
@@ -220,12 +239,53 @@ echo "    Build complete."
 install -m 0755 "${REPO_ROOT}/systray/target/release/${TRAY_BINARY}" "${TRAY_DEST}"
 echo "    ${TRAY_DEST}"
 
+# ------------------------------------------------------------
+# Install tray user service as the invoking user, not root
+# ------------------------------------------------------------
 echo "==> Installing tray user service..."
-mkdir -p "$(dirname "${TRAY_SERVICE_DEST}")"
-install -m 0644 "${TRAY_SERVICE_SRC}" "${TRAY_SERVICE_DEST}"
-systemctl --user daemon-reload
-systemctl --user enable webauthn-proxy-tray
-echo "    Start tray with: systemctl --user start webauthn-proxy-tray"
+
+if [[ -n "${SUDO_USER}" ]]; then
+    REAL_USER="${SUDO_USER}"
+else
+    REAL_USER="${USER}"
+fi
+
+REAL_USER_HOME=$(getent passwd "${REAL_USER}" | cut -d: -f6)
+REAL_USER_ID=$(id -u "${REAL_USER}")
+REAL_XDG_RUNTIME="/run/user/${REAL_USER_ID}"
+REAL_DBUS="unix:path=${REAL_XDG_RUNTIME}/bus"
+SYSTEMD_USER_DIR="${REAL_USER_HOME}/.config/systemd/user"
+
+# Create the user systemd directory owned by the real user
+mkdir -p "${SYSTEMD_USER_DIR}"
+chown "${REAL_USER}:${REAL_USER}" "${SYSTEMD_USER_DIR}"
+
+# Install the service file
+cp "${REPO_ROOT}/scripts/webauthn-proxy-tray.service" "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service"
+chmod 0644 "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service"
+chown "${REAL_USER}:${REAL_USER}" "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service"
+
+# Run systemctl --user as the real user with correct environment
+sudo -u "${REAL_USER}" \
+    XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
+    DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
+    systemctl --user daemon-reload
+
+sudo -u "${REAL_USER}" \
+    XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
+    DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
+    systemctl --user enable webauthn-proxy-tray
+
+# Symlink fallback to guarantee enable persists
+AUTOSTART_DIR="${SYSTEMD_USER_DIR}/default.target.wants"
+mkdir -p "${AUTOSTART_DIR}"
+chown "${REAL_USER}:${REAL_USER}" "${AUTOSTART_DIR}"
+ln -sf "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service" \
+       "${AUTOSTART_DIR}/webauthn-proxy-tray.service"
+chown -h "${REAL_USER}:${REAL_USER}" "${AUTOSTART_DIR}/webauthn-proxy-tray.service"
+
+echo "    Tray service installed and enabled for user '${REAL_USER}'"
+echo "    Start with: systemctl --user start webauthn-proxy-tray"
 
 # ---------------------------------------------------------------------------
 # 12. Instructions: set real extension ID
