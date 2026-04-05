@@ -8,8 +8,8 @@ pub struct DaemonClient {
 
 impl DaemonClient {
     pub fn new() -> Result<Self, String> {
-        let conn = Connection::session()
-            .map_err(|e| format!("D-Bus session connection failed: {e}"))?;
+        let conn = Connection::system()
+            .map_err(|e| format!("D-Bus system connection failed: {e}"))?;
         Ok(DaemonClient { conn })
     }
 
