@@ -1,26 +1,589 @@
 #!/usr/bin/env bash
-# install.sh — Build and install the WebAuthn Proxy native host and daemon.
-#
-# Run as root (or with sudo) after loading the Chrome extension.
-# Usage: sudo ./scripts/install.sh
-#
-# After running this script, replace EXTENSION_ID_PLACEHOLDER in the
-# installed host manifest with your real extension ID (see instructions
-# printed at the end of this script).
+# install.sh — WebAuthn Proxy full installer
+# Handles: Secure Boot setup, TPM verification, build, install, extension setup, health check
+# Run as normal user: ./scripts/install.sh (will prompt for sudo when needed)
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ── Helpers ──────────────────────────────────────────────────────────────────
+PASS="✓"; FAIL="✗"; WARN="⚠"; INFO="→"
+ok()    { echo "  ${PASS} $*"; }
+fail()  { echo "  ${FAIL} $*" >&2; }
+warn()  { echo "  ${WARN} $*"; }
+info()  { echo "  ${INFO} $*"; }
+die()   { echo ""; echo "FATAL: $*" >&2; exit 1; }
+confirm() {
+    local prompt="$1"
+    local reply
+    echo ""
+    read -rp "  ${prompt} [y/N] " reply
+    echo ""
+    [[ "${reply,,}" == "y" || "${reply,,}" == "yes" ]]
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+FAILED=0
+
+# ── Cargo discovery ───────────────────────────────────────────────────────────
+find_cargo() {
+    local user_home
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        user_home=$(getent passwd "${SUDO_USER}" | cut -d: -f6)
+    else
+        user_home="${HOME}"
+    fi
+    for candidate in \
+        "${user_home}/.cargo/bin/cargo" \
+        "${user_home}/.rustup/toolchains/"*/bin/cargo
+    do
+        [[ -x "${candidate}" ]] && echo "${candidate}" && return 0
+    done
+    for home in /home/*/; do
+        for candidate in \
+            "${home}.cargo/bin/cargo" \
+            "${home}.rustup/toolchains/"*/bin/cargo
+        do
+            [[ -x "${candidate}" ]] && echo "${candidate}" && return 0
+        done
+    done
+    for candidate in /usr/local/bin/cargo /usr/bin/cargo; do
+        [[ -x "${candidate}" ]] && echo "${candidate}" && return 0
+    done
+    return 1
+}
+
+CARGO="$(find_cargo)" || die "cargo not found. Install Rust from rustup.rs"
+export PATH="$(dirname "${CARGO}"):${PATH}"
+info "Using cargo: ${CARGO}"
+
+# ── Real user (for tray service and home-dir operations) ─────────────────────
+REAL_USER="${USER}"
+REAL_USER_HOME="${HOME}"
+
+# ── Distro detection ──────────────────────────────────────────────────────────
+detect_distro() {
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck source=/dev/null
+        source /etc/os-release
+        echo "${ID:-unknown}"
+    else
+        echo "unknown"
+    fi
+}
+DISTRO="$(detect_distro)"
+info "Detected distribution: ${DISTRO}"
+
+# ── Package manager helper ────────────────────────────────────────────────────
+install_package() {
+    local pkg="$1"
+    case "${DISTRO}" in
+        arch|manjaro|endeavouros)
+            sudo pacman -S --noconfirm "${pkg}" ;;
+        ubuntu|debian|linuxmint|pop)
+            sudo apt-get install -y "${pkg}" ;;
+        fedora)
+            sudo dnf install -y "${pkg}" ;;
+        opensuse*|sles)
+            sudo zypper install -y "${pkg}" ;;
+        *)
+            die "Unknown distro '${DISTRO}' — please install '${pkg}' manually and re-run" ;;
+    esac
+}
+
+echo ""
+echo "  This installer requires sudo for system-level operations."
+echo "  You may be prompted for your password."
+echo ""
+sudo -v || die "sudo authentication failed — cannot continue"
+# Keep sudo alive in the background for the duration of the script
+while true; do sudo -n true; sleep 50; kill -0 "$$" || exit; done 2>/dev/null &
+SUDO_KEEPALIVE_PID=$!
+trap 'kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null' EXIT
+
+# ════════════════════════════════════════════════════════════════════════════
+# PHASE 1 — SECURE BOOT
+# ════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo " Phase 1 — Secure Boot"
+echo "════════════════════════════════════════════════════════════"
+
+detect_secure_boot_state() {
+    # Primary: read raw EFI variable — most reliable across all tools
+    local sb_var val
+    sb_var="$(find /sys/firmware/efi/efivars -name 'SecureBoot-*' 2>/dev/null | head -1)"
+    if [[ -n "${sb_var}" ]]; then
+        # The EFI variable is 5 bytes: 4 attribute bytes + 1 value byte
+        # Value byte: 1 = enabled, 0 = disabled
+        val="$(od -An -tu1 "${sb_var}" 2>/dev/null | tr -s ' ' '\n' | grep -v '^$' | tail -1)"
+        if [[ "${val}" == "1" ]]; then
+            echo "enabled"
+            return
+        fi
+    fi
+
+    # Check Setup Mode via EFI variable
+    local sm_var sm_val
+    sm_var="$(find /sys/firmware/efi/efivars -name 'SetupMode-*' 2>/dev/null | head -1)"
+    if [[ -n "${sm_var}" ]]; then
+        sm_val="$(od -An -tu1 "${sm_var}" 2>/dev/null | tr -s ' ' '\n' | grep -v '^$' | tail -1)"
+        if [[ "${sm_val}" == "1" ]]; then
+            echo "setup_mode"
+            return
+        fi
+    fi
+
+    # Secondary: sbctl if available
+    if command -v sbctl &>/dev/null; then
+        local status
+        status="$(sbctl status 2>/dev/null || true)"
+        if echo "${status}" | grep -qiE "secure boot.*enabled|enabled.*secure boot"; then
+            echo "enabled"; return
+        elif echo "${status}" | grep -qiE "setup mode.*enabled|enabled.*setup mode"; then
+            echo "setup_mode"; return
+        elif echo "${status}" | grep -qiE "secure boot.*disabled|disabled.*secure boot"; then
+            echo "disabled"; return
+        fi
+    fi
+
+    # Tertiary: mokutil
+    if command -v mokutil &>/dev/null; then
+        local sb_state
+        sb_state="$(mokutil --sb-state 2>/dev/null || true)"
+        echo "${sb_state}" | grep -q "SecureBoot enabled" && echo "enabled" && return
+        echo "disabled"
+        return
+    fi
+
+    echo "disabled"
+}
+
+SB_STATE="$(detect_secure_boot_state)"
+
+case "${SB_STATE}" in
+    enabled)
+        ok "Secure Boot is enabled"
+        ;;
+    setup_mode)
+        warn "Secure Boot is in Setup Mode — keys can be enrolled"
+        ;;
+    disabled)
+        warn "Secure Boot is disabled"
+        ;;
+    unknown)
+        warn "Could not determine Secure Boot state"
+        ;;
+esac
+
+# Check if our binaries are already signed
+ALREADY_SIGNED=0
+if command -v sbctl &>/dev/null; then
+    if sbctl list-files 2>/dev/null | grep -q "webauthn-proxy"; then
+        ok "WebAuthn Proxy binaries already enrolled in sbctl"
+        ALREADY_SIGNED=1
+    fi
+fi
+
+# Check if mokutil is managing things
+USING_MOK=0
+if command -v mokutil &>/dev/null && ! command -v sbctl &>/dev/null; then
+    warn "mokutil detected — assuming user manages Secure Boot manually"
+    USING_MOK=1
+fi
+
+if [[ "${SB_STATE}" == "enabled" && "${ALREADY_SIGNED}" -eq 1 ]]; then
+    ok "Secure Boot fully configured — skipping setup"
+
+elif [[ "${USING_MOK}" -eq 1 ]]; then
+    echo ""
+    echo "  ────────────────────────────────────────────────────────"
+    echo "  mokutil detected — you are managing Secure Boot manually."
+    echo ""
+    echo "  This installer will not attempt to sign files with your"
+    echo "  MOK keys. After installation completes you MUST sign"
+    echo "  the following files with your own keys or the proxy"
+    echo "  daemon will refuse to start:"
+    echo ""
+    echo "    /usr/local/bin/webauthn-proxy-host"
+    echo "    /usr/local/bin/webauthn-proxy-daemon"
+    echo "    /usr/local/bin/webauthn-proxy-tray"
+    echo ""
+    echo "  Sign them with sbsign, pesign, or your preferred tool."
+    echo "  Example with sbsign:"
+    echo "    sudo sbsign --key /path/to/MOK.key --cert /path/to/MOK.crt \\"
+    echo "      --output /usr/local/bin/webauthn-proxy-daemon \\"
+    echo "      /usr/local/bin/webauthn-proxy-daemon"
+    echo ""
+    echo "  The proxy will not run without Secure Boot active and"
+    echo "  all binaries signed."
+    echo "  ────────────────────────────────────────────────────────"
+    echo ""
+    warn "Continuing installation — manual signing required before use"
+
+elif [[ "${SB_STATE}" == "disabled" && "${ALREADY_SIGNED}" -eq 0 ]]; then
+    echo ""
+    echo "  Secure Boot is not enabled on this system."
+    echo "  WebAuthn Proxy works best with Secure Boot enabled as it"
+    echo "  provides hardware-level protection for your authentication keys."
+    echo ""
+    if confirm "Would you like this script to guide you through Secure Boot setup?"; then
+
+        echo ""
+        echo "════════════════════════════════════════════════════════════"
+        echo ""
+        echo "  DISCLAIMER — PLEASE READ CAREFULLY"
+        echo ""
+        echo "  Secure Boot setup modifies your system firmware key database."
+        echo "  Incorrect configuration can prevent your system from booting."
+        echo ""
+        echo "  By proceeding you acknowledge:"
+        echo ""
+        echo "  - I am not responsible for any issues, data loss, or"
+        echo "    system failures that may result from this script."
+        echo ""
+        echo "  - It is strongly recommended that you research and"
+        echo "    understand Secure Boot before allowing any script"
+        echo "    to configure it on your behalf."
+        echo ""
+        echo "  - You should have a recovery method available before"
+        echo "    proceeding (live USB, backup bootloader, etc.)"
+        echo ""
+        echo "  - This script will enroll new signing keys into your"
+        echo "    firmware. This cannot be easily undone without"
+        echo "    entering BIOS and clearing platform keys."
+        echo ""
+        echo "════════════════════════════════════════════════════════════"
+        echo ""
+        echo "  To confirm you have read and understood the above,"
+        echo "  type the following exactly and press Enter:"
+        echo ""
+        echo '  Yes. I understand and agree. Continue with script secure-boot setup.'
+        echo ""
+        read -rp "  Your response: " SB_CONSENT
+        echo ""
+
+        if [[ "${SB_CONSENT}" != "Yes. I understand and agree. Continue with script secure-boot setup." ]]; then
+            warn "Consent not confirmed — skipping Secure Boot setup"
+            warn "You can set up Secure Boot manually and re-run this script"
+            SB_STATE="skip"
+        else
+            ok "Consent confirmed — proceeding with Secure Boot setup"
+
+            if ! command -v sbctl &>/dev/null; then
+                info "Installing sbctl..."
+                install_package sbctl
+            fi
+
+            SB_STATUS="$(sbctl status 2>/dev/null || true)"
+
+            if echo "${SB_STATUS}" | grep -q "Setup Mode.*Enabled"; then
+                ok "System is in Setup Mode — ready to enroll keys"
+
+                echo ""
+                info "Step 1: Generate Secure Boot signing keys"
+                if confirm "Generate new Secure Boot keys now?"; then
+                    sudo sbctl create-keys
+                    ok "Keys generated"
+                else
+                    die "Cannot continue without Secure Boot keys"
+                fi
+
+                # Detect dual boot
+                DUAL_BOOT=0
+                if bootctl list 2>/dev/null | grep -qi "windows"; then
+                    warn "Windows boot entry detected — dual boot system"
+                    DUAL_BOOT=1
+                fi
+
+                echo ""
+                info "Step 2: Enroll keys into firmware"
+                echo ""
+                if [[ "${DUAL_BOOT}" -eq 1 ]]; then
+                    echo "  Windows was detected on this system."
+                    echo "  Enrolling Microsoft keys is recommended for dual boot"
+                    echo "  systems to maintain hardware and driver compatibility."
+                    echo ""
+                    if confirm "Enroll keys WITH Microsoft keys included (recommended for dual boot)?"; then
+                        sudo sbctl enroll-keys --microsoft
+                        ok "Keys enrolled with Microsoft keys"
+                    else
+                        echo ""
+                        warn "Enrolling WITHOUT Microsoft keys on a dual boot system"
+                        warn "may prevent Windows from booting or cause hardware issues."
+                        echo ""
+                        if confirm "Are you sure you want to enroll WITHOUT Microsoft keys?"; then
+                            sudo sbctl enroll-keys
+                            ok "Keys enrolled without Microsoft keys"
+                        else
+                            sudo sbctl enroll-keys --microsoft
+                            ok "Keys enrolled with Microsoft keys"
+                        fi
+                    fi
+                else
+                    echo "  Single boot system detected."
+                    echo "  You can enroll with or without Microsoft keys."
+                    echo "  Microsoft keys are not required for single boot Linux systems"
+                    echo "  but some hardware (graphics cards, network cards) may need them."
+                    echo ""
+                    if confirm "Enroll keys WITH Microsoft keys included?"; then
+                        sudo sbctl enroll-keys --microsoft
+                        ok "Keys enrolled with Microsoft keys"
+                    else
+                        sudo sbctl enroll-keys
+                        ok "Keys enrolled without Microsoft keys"
+                    fi
+                fi
+
+            else
+                echo ""
+                echo "  ────────────────────────────────────────────────────"
+                echo "  Your system is not in Secure Boot Setup Mode."
+                echo ""
+                echo "  To enable Secure Boot setup you need to:"
+                echo "  1. Reboot your machine"
+                echo "  2. Enter BIOS/UEFI firmware (usually F2, F12, DEL,"
+                echo "     or ESC during boot — check your motherboard manual)"
+                echo "  3. Find the Secure Boot settings"
+                echo "  4. Clear existing Platform Keys or enable Setup Mode"
+                echo "  5. Save and reboot"
+                echo "  6. Run this installer again"
+                echo ""
+                echo "  WARNING: Clearing Platform Keys will disable Secure Boot"
+                echo "  temporarily until new keys are enrolled. This is normal"
+                echo "  and expected during the setup process."
+                echo "  ────────────────────────────────────────────────────"
+                echo ""
+                warn "Secure Boot setup requires BIOS intervention — cannot continue with Secure Boot"
+                warn "Continuing installation without Secure Boot — TPM key protection will be weaker"
+            fi
+        fi
+    else
+        warn "Skipping Secure Boot setup — continuing without it"
+        warn "TPM key sealing will provide less protection without Secure Boot"
+    fi
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — TPM2
+# ════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo " Phase 2 — TPM2"
+echo "════════════════════════════════════════════════════════════"
+
+if [[ -c /dev/tpm0 && -c /dev/tpmrm0 ]]; then
+    ok "TPM2 device present"
+
+    if ! command -v tpm2_getcap &>/dev/null; then
+        warn "tpm2-tools not installed — installing..."
+        install_package tpm2-tools
+    fi
+
+    if tpm2_getcap properties-fixed &>/dev/null; then
+        ok "TPM2 is responsive"
+    else
+        warn "TPM2 device found but not responding — check tpm2-abrmd service"
+    fi
+else
+    echo ""
+    echo "  ────────────────────────────────────────────────────────"
+    echo "  TPM2 is required but was not detected on this system."
+    echo ""
+    echo "  TPM2 is usually disabled in BIOS/UEFI by default."
+    echo "  To enable it:"
+    echo ""
+    echo "  1. Reboot your machine"
+    echo "  2. Enter BIOS/UEFI firmware (F2, F12, DEL, or ESC)"
+    echo "  3. Find Security settings"
+    echo "  4. Look for: TPM, TPM2, PTT (Intel), fTPM (AMD), or"
+    echo "     Trusted Platform Module"
+    echo "  5. Enable it"
+    echo "  6. Save and reboot"
+    echo "  7. Run this installer again"
+    echo ""
+    echo "  Note: Some older machines do not have a TPM2 chip."
+    echo "  If TPM settings are not in your BIOS, your hardware"
+    echo "  may not support it."
+    echo "  ────────────────────────────────────────────────────────"
+    echo ""
+    die "TPM2 not found. Enable TPM2 in BIOS and run this script again."
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
+# PHASE 3 — DETECT BOOT ENVIRONMENT
+# ════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo " Phase 3 — Boot Environment Detection"
+echo "════════════════════════════════════════════════════════════"
+
+detect_esp() {
+    local esp
+    esp="$(bootctl status 2>/dev/null | grep -i "ESP:" | awk '{print $2}' | head -1)"
+    if [[ -n "${esp}" && -d "${esp}" ]]; then
+        echo "${esp}"
+        return 0
+    fi
+    for mp in /efi /boot/efi /boot; do
+        if mountpoint -q "${mp}" 2>/dev/null; then
+            if [[ -d "${mp}/EFI" ]]; then
+                echo "${mp}"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+ESP="$(detect_esp)" || die "Cannot detect EFI System Partition. Is this a UEFI system?"
+ok "EFI System Partition: ${ESP}"
+
+BOOTLOADER="unknown"
+if [[ -f "${ESP}/EFI/systemd/systemd-bootx64.efi" ]] || \
+   [[ -f "${ESP}/EFI/systemd/systemd-bootaa64.efi" ]]; then
+    BOOTLOADER="systemd-boot"
+    ok "Bootloader: systemd-boot"
+elif [[ -f "${ESP}/EFI/grub/grubx64.efi" ]] || \
+     [[ -f "${ESP}/EFI/grub2/grubx64.efi" ]] || \
+     command -v grub-install &>/dev/null || \
+     command -v grub2-install &>/dev/null; then
+    BOOTLOADER="grub"
+    ok "Bootloader: GRUB"
+else
+    warn "Could not detect bootloader"
+    BOOTLOADER="unknown"
+fi
+
+FILES_TO_SIGN=()
+
+should_exclude() {
+    local f="${1,,}"
+    [[ "${f}" =~ /microsoft/ ]] && return 0
+    [[ "${f}" =~ /windows/ ]] && return 0
+    [[ "${f}" =~ bootmgr ]] && return 0
+    [[ "${f}" =~ memtest ]] && return 0
+    [[ "${f}" =~ recovery ]] && return 0
+    return 1
+}
+
+detect_files_to_sign() {
+    info "Scanning for files to sign..."
+
+    if [[ "${BOOTLOADER}" == "systemd-boot" ]]; then
+        for f in \
+            "${ESP}/EFI/systemd/systemd-bootx64.efi" \
+            "${ESP}/EFI/systemd/systemd-bootaa64.efi" \
+            "${ESP}/EFI/BOOT/BOOTX64.EFI" \
+            "${ESP}/EFI/BOOT/bootx64.efi"
+        do
+            if [[ -f "${f}" ]]; then
+                if should_exclude "${f}"; then
+                    warn "Auto-excluded: ${f}"
+                else
+                    FILES_TO_SIGN+=("${f}")
+                fi
+            fi
+        done
+
+        for f in "${ESP}/EFI/Linux/"*.efi; do
+            if [[ -f "${f}" ]]; then
+                if should_exclude "${f}"; then
+                    warn "Auto-excluded (Windows/Microsoft file): ${f}"
+                else
+                    FILES_TO_SIGN+=("${f}")
+                fi
+            fi
+        done
+
+        for dir in \
+            "${ESP}/EFI/arch" \
+            "${ESP}/EFI/ubuntu" \
+            "${ESP}/EFI/fedora" \
+            "${ESP}/EFI/opensuse"
+        do
+            for f in "${dir}/"*.efi; do
+                if [[ -f "${f}" ]]; then
+                    if should_exclude "${f}"; then
+                        warn "Auto-excluded (Windows/Microsoft file): ${f}"
+                    else
+                        FILES_TO_SIGN+=("${f}")
+                    fi
+                fi
+            done
+        done
+
+    elif [[ "${BOOTLOADER}" == "grub" ]]; then
+        for f in \
+            "${ESP}/EFI/grub/grubx64.efi" \
+            "${ESP}/EFI/grub2/grubx64.efi" \
+            "${ESP}/EFI/BOOT/BOOTX64.EFI" \
+            "${ESP}/EFI/BOOT/bootx64.efi"
+        do
+            if [[ -f "${f}" ]]; then
+                if should_exclude "${f}"; then
+                    warn "Auto-excluded (Windows/Microsoft file): ${f}"
+                else
+                    FILES_TO_SIGN+=("${f}")
+                fi
+            fi
+        done
+        warn "GRUB detected: kernel signing depends on your shim setup"
+        warn "If using shim, your distro manages kernel signing separately"
+    else
+        while IFS= read -r -d '' f; do
+            if should_exclude "${f}"; then
+                warn "Auto-excluded (Windows/Microsoft file): ${f}"
+            else
+                FILES_TO_SIGN+=("${f}")
+            fi
+        done < <(find "${ESP}" -name "*.efi" -print0 2>/dev/null)
+    fi
+
+    # Deduplicate
+    local -A seen
+    local deduped=()
+    local f
+    for f in "${FILES_TO_SIGN[@]:-}"; do
+        if [[ -z "${seen[${f}]:-}" ]]; then
+            seen["${f}"]=1
+            deduped+=("${f}")
+        fi
+    done
+    FILES_TO_SIGN=()
+    for f in "${deduped[@]:-}"; do
+        FILES_TO_SIGN+=("${f}")
+    done
+}
+
+detect_files_to_sign
+
+if [[ ${#FILES_TO_SIGN[@]} -gt 0 ]]; then
+    info "Files that will be signed with Secure Boot keys:"
+    for f in "${FILES_TO_SIGN[@]}"; do
+        echo "      ${f}"
+    done
+else
+    warn "No EFI files found to sign"
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
+# PHASE 4 — BUILD AND INSTALL
+# ════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo " Phase 4 — Build and Install"
+echo "════════════════════════════════════════════════════════════"
+
 HOST_BINARY="webauthn-proxy-host"
 DAEMON_BINARY="webauthn-proxy-daemon"
+TRAY_BINARY="webauthn-proxy-tray"
 HOST_DEST="/usr/local/bin/${HOST_BINARY}"
 DAEMON_DEST="/usr/local/bin/${DAEMON_BINARY}"
+TRAY_DEST="/usr/local/bin/${TRAY_BINARY}"
 HOST_MANIFEST_SRC="${REPO_ROOT}/scripts/com.webauthnproxy.host.json"
 SYSTEMD_UNIT_SRC="${REPO_ROOT}/scripts/webauthn-proxy-daemon.service"
-TRAY_BINARY="webauthn-proxy-tray"
-TRAY_DEST="/usr/local/bin/${TRAY_BINARY}"
 TRAY_SERVICE_SRC="${REPO_ROOT}/scripts/webauthn-proxy-tray.service"
-TRAY_SERVICE_DEST="${HOME}/.config/systemd/user/webauthn-proxy-tray.service"
 WEBAUTHN_DIR="/etc/webauthn-proxy"
 CREDENTIAL_DIR="${WEBAUTHN_DIR}/credentials"
 KEY_DIR="${WEBAUTHN_DIR}/keys"
@@ -29,173 +592,81 @@ BOOTSTRAP_KEY="${WEBAUTHN_DIR}/bootstrap.key"
 PAM_SERVICE="/etc/pam.d/webauthn-proxy"
 SYSTEMD_UNIT="/etc/systemd/system/webauthn-proxy-daemon.service"
 DAEMON_USER="webauthn-proxy"
-
-# Chrome and Chromium native messaging host directories (system-wide)
 CHROME_NMH_DIR="/etc/opt/chrome/native-messaging-hosts"
 CHROMIUM_NMH_DIR="/etc/chromium/native-messaging-hosts"
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-die() { echo "FATAL: $*" >&2; exit 1; }
-
-# ---------------------------------------------------------------------------
-# Cargo detection — sudo resets PATH and loses the rustup shim
-# ---------------------------------------------------------------------------
-find_cargo() {
-    if [[ -n "${SUDO_USER}" ]]; then
-        local user_home
-        user_home=$(getent passwd "${SUDO_USER}" | cut -d: -f6)
-        for candidate in \
-            "${user_home}/.cargo/bin/cargo" \
-            "${user_home}/.rustup/toolchains/"*/bin/cargo
-        do
-            if [[ -x "${candidate}" ]]; then
-                echo "${candidate}"
-                return 0
-            fi
-        done
-    fi
-
-    for home in /home/*/; do
-        for candidate in \
-            "${home}.cargo/bin/cargo" \
-            "${home}.rustup/toolchains/"*/bin/cargo
-        do
-            if [[ -x "${candidate}" ]]; then
-                echo "${candidate}"
-                return 0
-            fi
-        done
-    done
-
-    for candidate in /usr/local/bin/cargo /usr/bin/cargo; do
-        if [[ -x "${candidate}" ]]; then
-            echo "${candidate}"
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-CARGO="$(find_cargo)" || die "cargo not found. Install Rust from rustup.rs then re-run this script."
-export PATH="$(dirname "${CARGO}"):${PATH}"
-echo "    Using cargo: ${CARGO}"
-
-# Resolve the real invoking user early — needed for builds and tray install
-if [[ -n "${SUDO_USER}" ]]; then
-    REAL_USER="${SUDO_USER}"
-else
-    REAL_USER="${USER}"
-fi
-REAL_USER_HOME=$(getent passwd "${REAL_USER}" | cut -d: -f6)
-
-# ---------------------------------------------------------------------------
-# 0. Preflight: Secure Boot + TPM2
-# ---------------------------------------------------------------------------
-echo "==> Checking hardware prerequisites..."
-
-# Secure Boot
-if bootctl status 2>/dev/null | grep -q "Secure Boot: enabled"; then
-    echo "    Secure Boot: enabled ✓"
-else
-    echo "    WARNING: Secure Boot does not appear to be enabled."
-    echo "             TPM2 PCR binding provides weaker guarantees without Secure Boot."
-    echo "             Continuing — set ProtectKernelModules=yes in the service unit"
-    echo "             to limit exposure."
-fi
-
-# TPM2
-if [[ -c /dev/tpm0 && -c /dev/tpmrm0 ]]; then
-    echo "    TPM2: present ✓"
-else
-    echo "    WARNING: /dev/tpm0 or /dev/tpmrm0 not found."
-    echo "             The software fallback (plaintext keys on disk) will be used."
-    echo "             Do NOT use in production without a TPM2 chip."
-fi
-
-# ---------------------------------------------------------------------------
-# 1. Create dedicated system user
-# ---------------------------------------------------------------------------
-echo "==> Ensuring system user '${DAEMON_USER}' exists..."
+# ── 4.1 Create dedicated system user ─────────────────────────────────────
+echo ""
+info "Ensuring system user '${DAEMON_USER}' exists..."
 if id "${DAEMON_USER}" &>/dev/null; then
-    echo "    User already exists."
+    ok "User '${DAEMON_USER}' already exists."
 else
-    useradd --system --no-create-home --shell /usr/sbin/nologin "${DAEMON_USER}"
-    echo "    Created system user '${DAEMON_USER}'."
+    sudo useradd --system --no-create-home --shell /usr/sbin/nologin "${DAEMON_USER}"
+    ok "Created system user '${DAEMON_USER}'."
 fi
 
-# ---------------------------------------------------------------------------
-# 2. Build native host
-# ---------------------------------------------------------------------------
-echo "==> Building ${HOST_BINARY} (release)..."
+# ── 4.2 Build native host ─────────────────────────────────────────────────
+echo ""
+info "Building ${HOST_BINARY} (release)..."
 cd "${REPO_ROOT}/native-host"
-sudo -u "${REAL_USER}" env PATH="$(dirname ${CARGO}):$PATH" HOME="${REAL_USER_HOME}" $CARGO build --release
-echo "    Build complete."
+RUSTFLAGS="-A warnings" "${CARGO}" build --release
+ok "Build complete: ${HOST_BINARY}"
 
-# ---------------------------------------------------------------------------
-# 3. Build daemon
-# ---------------------------------------------------------------------------
-echo "==> Building ${DAEMON_BINARY} (release)..."
+# ── 4.3 Build daemon ──────────────────────────────────────────────────────
+echo ""
+info "Building ${DAEMON_BINARY} (release)..."
 cd "${REPO_ROOT}/daemon"
-sudo -u "${REAL_USER}" env PATH="$(dirname ${CARGO}):$PATH" HOME="${REAL_USER_HOME}" $CARGO build --release
-echo "    Build complete."
+RUSTFLAGS="-A warnings" "${CARGO}" build --release
+ok "Build complete: ${DAEMON_BINARY}"
 
-# ---------------------------------------------------------------------------
-# 4. Install binaries
-# ---------------------------------------------------------------------------
-echo "==> Installing binaries..."
-install -m 0755 "${REPO_ROOT}/native-host/target/release/${HOST_BINARY}"   "${HOST_DEST}"
-install -m 0755 "${REPO_ROOT}/daemon/target/release/${DAEMON_BINARY}"       "${DAEMON_DEST}"
-echo "    ${HOST_DEST}"
-echo "    ${DAEMON_DEST}"
+# ── 4.4 Install binaries ──────────────────────────────────────────────────
+echo ""
+info "Installing binaries..."
+sudo install -m 0755 "${REPO_ROOT}/native-host/target/release/${HOST_BINARY}" "${HOST_DEST}"
+sudo install -m 0755 "${REPO_ROOT}/daemon/target/release/${DAEMON_BINARY}"    "${DAEMON_DEST}"
+ok "${HOST_DEST}"
+ok "${DAEMON_DEST}"
 
-# ---------------------------------------------------------------------------
-# 5. Create /etc/webauthn-proxy/ directory structure
-# ---------------------------------------------------------------------------
-echo "==> Creating ${WEBAUTHN_DIR}/ directories..."
-install -d -m 0700 -o "${DAEMON_USER}" "${WEBAUTHN_DIR}"
-install -d -m 0700 -o "${DAEMON_USER}" "${CREDENTIAL_DIR}"
-install -d -m 0700 -o "${DAEMON_USER}" "${KEY_DIR}"
-echo "    Directories ready."
+# ── 4.5 Create /etc/webauthn-proxy/ directory structure ───────────────────
+echo ""
+info "Creating ${WEBAUTHN_DIR}/ directories..."
+sudo install -d -m 0700 -o "${DAEMON_USER}" "${WEBAUTHN_DIR}"
+sudo install -d -m 0700 -o "${DAEMON_USER}" "${CREDENTIAL_DIR}"
+sudo install -d -m 0700 -o "${DAEMON_USER}" "${KEY_DIR}"
+ok "Directories ready."
 
-# ---------------------------------------------------------------------------
-# 6. Generate bootstrap key (if not already present)
-# ---------------------------------------------------------------------------
+# ── 4.6 Generate bootstrap key (if not already present) ──────────────────
+echo ""
 if [[ ! -f "${BOOTSTRAP_KEY}" ]]; then
-    echo "==> Generating bootstrap key at ${BOOTSTRAP_KEY}..."
-    openssl rand -hex 32 > "${BOOTSTRAP_KEY}"
-    chmod 0640 "${BOOTSTRAP_KEY}"
-    chown "root:${DAEMON_USER}" "${BOOTSTRAP_KEY}"
-    echo "    Bootstrap key generated."
+    info "Generating bootstrap key at ${BOOTSTRAP_KEY}..."
+    sudo bash -c "openssl rand -hex 32 > '${BOOTSTRAP_KEY}'"
+    sudo chmod 0640 "${BOOTSTRAP_KEY}"
+    sudo chown "root:${DAEMON_USER}" "${BOOTSTRAP_KEY}"
+    ok "Bootstrap key generated."
 else
-    echo "    Bootstrap key already exists at ${BOOTSTRAP_KEY}, skipping."
+    ok "Bootstrap key already exists at ${BOOTSTRAP_KEY}, skipping."
 fi
 
-# ---------------------------------------------------------------------------
-# 7. Hash both binaries and write trusted-binaries.json
-# ---------------------------------------------------------------------------
-echo "==> Writing trusted binary hashes to ${TRUSTED_HASHES}..."
+# ── 4.7 Write initial trusted binary hashes ───────────────────────────────
+echo ""
+info "Writing trusted binary hashes to ${TRUSTED_HASHES}..."
 HOST_HASH="$(sha256sum "${HOST_DEST}" | awk '{print $1}')"
 DAEMON_HASH="$(sha256sum "${DAEMON_DEST}" | awk '{print $1}')"
-
-cat > "${TRUSTED_HASHES}" <<EOF
+sudo tee "${TRUSTED_HASHES}" > /dev/null << EOF
 [
   { "path": "${HOST_DEST}",   "sha256": "${HOST_HASH}" },
   { "path": "${DAEMON_DEST}", "sha256": "${DAEMON_HASH}" }
 ]
 EOF
-chmod 0644 "${TRUSTED_HASHES}"
-echo "    native-host:  ${HOST_HASH}"
-echo "    daemon:       ${DAEMON_HASH}"
+sudo chmod 0644 "${TRUSTED_HASHES}"
+ok "native-host:  ${HOST_HASH}"
+ok "daemon:       ${DAEMON_HASH}"
 
-# ---------------------------------------------------------------------------
-# 8. Install PAM service configuration
-# ---------------------------------------------------------------------------
+# ── 4.8 Install PAM service configuration ────────────────────────────────
+echo ""
 if [[ ! -f "${PAM_SERVICE}" ]]; then
-    echo "==> Installing PAM service config at ${PAM_SERVICE}..."
-    cat > "${PAM_SERVICE}" <<'EOF'
+    info "Installing PAM service config at ${PAM_SERVICE}..."
+    sudo tee "${PAM_SERVICE}" > /dev/null << 'EOF'
 # /etc/pam.d/webauthn-proxy
 # PAM configuration for the WebAuthn Proxy user-presence check.
 # Requires the logged-in user to authenticate before every WebAuthn operation.
@@ -208,128 +679,494 @@ if [[ ! -f "${PAM_SERVICE}" ]]; then
 auth     required  pam_unix.so
 account  required  pam_unix.so
 EOF
-    echo "    PAM service installed."
+    ok "PAM service installed."
 else
-    echo "    PAM service already exists at ${PAM_SERVICE}, skipping."
+    ok "PAM service already exists at ${PAM_SERVICE}, skipping."
 fi
 
-# ---------------------------------------------------------------------------
-# 9. Install D-Bus system policy
-# ---------------------------------------------------------------------------
-echo "==> Installing D-Bus system policy..."
-install -m 0644 "${REPO_ROOT}/scripts/com.webauthnproxy.Daemon.conf" \
+# ── 4.9 Install D-Bus system policy ──────────────────────────────────────
+echo ""
+info "Installing D-Bus system policy..."
+sudo install -m 0644 "${REPO_ROOT}/scripts/com.webauthnproxy.Daemon.conf" \
     "/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf"
-echo "    D-Bus policy installed."
+ok "D-Bus policy installed."
 
-# ---------------------------------------------------------------------------
-# 10. Install native messaging host manifest
-# ---------------------------------------------------------------------------
+# ── 4.10 Install native messaging host manifests ──────────────────────────
 install_manifest() {
     local dest_dir="$1"
-    mkdir -p "${dest_dir}"
-    install -m 0644 "${HOST_MANIFEST_SRC}" "${dest_dir}/com.webauthnproxy.host.json"
-    echo "    Manifest installed to ${dest_dir}/"
+    sudo mkdir -p "${dest_dir}"
+    sudo install -m 0644 "${HOST_MANIFEST_SRC}" "${dest_dir}/com.webauthnproxy.host.json"
+    ok "Manifest installed to ${dest_dir}/"
 }
 
-echo "==> Installing native messaging host manifests..."
+echo ""
+info "Installing native messaging host manifests..."
 install_manifest "${CHROME_NMH_DIR}"
 install_manifest "${CHROMIUM_NMH_DIR}"
 
-# ---------------------------------------------------------------------------
-# 10. Install and enable systemd service
-# ---------------------------------------------------------------------------
-echo "==> Installing systemd service unit..."
-install -m 0644 "${SYSTEMD_UNIT_SRC}" "${SYSTEMD_UNIT}"
-systemctl daemon-reload
-systemctl enable webauthn-proxy-daemon
-echo "    Service enabled. Start with: systemctl start webauthn-proxy-daemon"
+# ── 4.11 Install and enable systemd daemon service ────────────────────────
+echo ""
+info "Installing systemd service unit..."
+sudo install -m 0644 "${SYSTEMD_UNIT_SRC}" "${SYSTEMD_UNIT}"
+sudo systemctl daemon-reload
+sudo systemctl enable webauthn-proxy-daemon
+ok "Daemon service enabled."
 
-# ---------------------------------------------------------------------------
-# 11. Build and install system tray
-# ---------------------------------------------------------------------------
-echo "==> Building ${TRAY_BINARY} (release)..."
+# ── 4.12 Build systray ────────────────────────────────────────────────────
+echo ""
+info "Building ${TRAY_BINARY} (release)..."
 cd "${REPO_ROOT}/systray"
-sudo -u "${REAL_USER}" env PATH="$(dirname ${CARGO}):$PATH" HOME="${REAL_USER_HOME}" $CARGO build --release
-echo "    Build complete."
+RUSTFLAGS="-A warnings" "${CARGO}" build --release
+ok "Build complete: ${TRAY_BINARY}"
 
-install -m 0755 "${REPO_ROOT}/systray/target/release/${TRAY_BINARY}" "${TRAY_DEST}"
-echo "    ${TRAY_DEST}"
+# ── 4.13 Install systray binary ───────────────────────────────────────────
+sudo install -m 0755 "${REPO_ROOT}/systray/target/release/${TRAY_BINARY}" "${TRAY_DEST}"
+ok "${TRAY_DEST}"
 
-# ------------------------------------------------------------
-# Install tray user service as the invoking user, not root
-# ------------------------------------------------------------
-echo "==> Installing tray user service..."
+# ── 4.14 Install tray user service (as the real user, not root) ───────────
+echo ""
+info "Installing tray user service..."
 
 REAL_USER_ID=$(id -u "${REAL_USER}")
 REAL_XDG_RUNTIME="/run/user/${REAL_USER_ID}"
 REAL_DBUS="unix:path=${REAL_XDG_RUNTIME}/bus"
 SYSTEMD_USER_DIR="${REAL_USER_HOME}/.config/systemd/user"
 
-# Create the user systemd directory owned by the real user
 mkdir -p "${SYSTEMD_USER_DIR}"
-chown "${REAL_USER}:${REAL_USER}" "${SYSTEMD_USER_DIR}"
 
-# Install the service file
-cp "${REPO_ROOT}/scripts/webauthn-proxy-tray.service" "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service"
+cp "${TRAY_SERVICE_SRC}" "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service"
 chmod 0644 "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service"
-chown "${REAL_USER}:${REAL_USER}" "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service"
 
-# Run systemctl --user as the real user with correct environment
-sudo -u "${REAL_USER}" \
-    XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
-    DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
+XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
+DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
     systemctl --user daemon-reload
 
-sudo -u "${REAL_USER}" \
-    XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
-    DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
+XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
+DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
     systemctl --user enable webauthn-proxy-tray
 
 # Symlink fallback to guarantee enable persists
 AUTOSTART_DIR="${SYSTEMD_USER_DIR}/default.target.wants"
 mkdir -p "${AUTOSTART_DIR}"
-chown "${REAL_USER}:${REAL_USER}" "${AUTOSTART_DIR}"
 ln -sf "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service" \
        "${AUTOSTART_DIR}/webauthn-proxy-tray.service"
-chown -h "${REAL_USER}:${REAL_USER}" "${AUTOSTART_DIR}/webauthn-proxy-tray.service"
 
-echo "    Tray service installed and enabled for user '${REAL_USER}'"
-echo "    Start with: systemctl --user start webauthn-proxy-tray"
+ok "Tray service installed and enabled for user '${REAL_USER}'"
 
-# ---------------------------------------------------------------------------
-# 12. Instructions: set real extension ID
-# ---------------------------------------------------------------------------
-cat <<'INSTRUCTIONS'
+# ════════════════════════════════════════════════════════════════════════════
+# PHASE 5 — SIGN BINARIES WITH SECURE BOOT KEYS
+# ════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo " Phase 5 — Sign Binaries"
+echo "════════════════════════════════════════════════════════════"
 
-============================================================
- ACTION REQUIRED — Set your extension ID
-============================================================
+if command -v sbctl &>/dev/null && [[ "${SB_STATE:-}" != "skip" && "${SB_STATE:-}" != "disabled" && "${SB_STATE:-}" != "unknown" ]]; then
 
-1. Load the extension in Chrome:
-     chrome://extensions/ → Enable "Developer mode" → "Load unpacked"
-     Select the extension/ directory in this repository.
+    # ── Per-file prompt for EFI boot files ───────────────────────
+    if [[ ${#FILES_TO_SIGN[@]} -gt 0 ]]; then
+        echo ""
+        info "EFI boot file signing — you will be asked about each file."
+        info "Only sign Linux bootloader and UKI files."
+        info "Do NOT sign Windows files — they are already signed by Microsoft."
+        echo ""
 
-2. Copy the Extension ID shown on the extensions page
-   (a 32-character string like: abcdefghijklmnopabcdefghijklmnop)
+        for f in "${FILES_TO_SIGN[@]:-}"; do
+            if [[ ! -f "${f}" ]]; then
+                warn "File not found, skipping: ${f}"
+                continue
+            fi
 
-3. Replace the placeholder in the installed host manifests:
+            echo ""
+            echo "  ──────────────────────────────────────────────────────"
+            echo "  File: ${f}"
+            echo ""
+            echo "  Is this a Linux bootloader or UKI file that you want"
+            echo "  protected by Secure Boot? If this is a Windows file,"
+            echo "  choose S to skip."
+            echo "  ──────────────────────────────────────────────────────"
+            echo ""
 
-     EXTENSION_ID="<paste your ID here>"
+            while true; do
+                read -rp "  Sign this file? [Y]es / [S]kip / [Q]uit signing: " SIGN_CHOICE
+                case "${SIGN_CHOICE,,}" in
+                    y|yes)
+                        sudo sbctl sign --save "${f}"
+                        ok "Signed and saved: ${f}"
+                        break
+                        ;;
+                    s|skip)
+                        warn "Skipped: ${f}"
+                        break
+                        ;;
+                    q|quit)
+                        warn "Signing cancelled — remaining files not signed"
+                        break 2
+                        ;;
+                    *)
+                        echo "  Please type Y, S, or Q"
+                        ;;
+                esac
+            done
+        done
+    fi
 
-     for f in \
-       /etc/opt/chrome/native-messaging-hosts/com.webauthnproxy.host.json \
-       /etc/chromium/native-messaging-hosts/com.webauthnproxy.host.json; do
-       [[ -f "$f" ]] && sudo sed -i \
-         "s|EXTENSION_ID_PLACEHOLDER|${EXTENSION_ID}|g" "$f"
-     done
+    # ── Verify and summarise ──────────────────────────────────────
+    echo ""
+    info "Verifying signatures..."
+    VERIFY_OUT="$(sudo sbctl verify 2>&1 || true)"
+    SIGNED=$(echo "${VERIFY_OUT}" | grep -c "✓" || true)
+    UNSIGNED=$(echo "${VERIFY_OUT}" | grep -c "✗" || true)
+    ok "Signature verification: ${SIGNED} signed, ${UNSIGNED} not signed"
+    info "(Unsigned Microsoft/Windows files are expected and normal)"
 
-4. Start the daemon:  systemctl start webauthn-proxy-daemon
+else
+    info "Skipping binary signing (Secure Boot not active or sbctl not available)"
+    # Still add our binaries to sbctl database if sbctl exists
+    # so they get signed when Secure Boot is later enabled
+    if command -v sbctl &>/dev/null; then
+        info "Registering binaries with sbctl for future signing..."
+        for bin in "${HOST_DEST}" "${DAEMON_DEST}" "${TRAY_DEST}"; do
+            [[ -f "${bin}" ]] && sudo sbctl sign --save "${bin}" 2>/dev/null || true
+        done
+    fi
+fi
 
-5. Reload the extension (click the refresh icon on chrome://extensions/).
+# Update binary hashes AFTER signing — signing changes the file and its SHA-256
+echo ""
+info "Updating trusted binary hashes..."
+HOST_HASH="$(sha256sum "${HOST_DEST}" | awk '{print $1}')"
+DAEMON_HASH="$(sha256sum "${DAEMON_DEST}" | awk '{print $1}')"
+sudo tee "${TRUSTED_HASHES}" > /dev/null << EOF
+[
+  { "path": "${HOST_DEST}",   "sha256": "${HOST_HASH}" },
+  { "path": "${DAEMON_DEST}", "sha256": "${DAEMON_HASH}" }
+]
+EOF
+ok "Binary hashes updated"
 
-Logs:
-  Daemon:      journalctl -u webauthn-proxy-daemon  (or /tmp/webauthn-proxy-daemon.log)
-  Native host: /tmp/webauthn-proxy-host.log
+# ════════════════════════════════════════════════════════════════════════════
+# PHASE 6 — START SERVICES
+# ════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo " Phase 6 — Start Services"
+echo "════════════════════════════════════════════════════════════"
 
-============================================================
-INSTRUCTIONS
+echo ""
+info "Starting webauthn-proxy-daemon..."
+sudo systemctl start webauthn-proxy-daemon
+sleep 2
+if systemctl is-active --quiet webauthn-proxy-daemon; then
+    ok "webauthn-proxy-daemon is running"
+else
+    fail "webauthn-proxy-daemon failed to start"
+    fail "Check: journalctl -u webauthn-proxy-daemon -n 20"
+    FAILED=1
+fi
+
+info "Starting webauthn-proxy-tray..."
+XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
+DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
+    systemctl --user start webauthn-proxy-tray 2>/dev/null || true
+sleep 1
+if XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
+   DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
+   systemctl --user is-active --quiet webauthn-proxy-tray 2>/dev/null; then
+    ok "webauthn-proxy-tray is running"
+else
+    warn "webauthn-proxy-tray did not start — you can start it manually:"
+    warn "systemctl --user start webauthn-proxy-tray"
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
+# PHASE 7 — EXTENSION SETUP
+# ════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo " Phase 7 — Browser Extension Setup"
+echo "════════════════════════════════════════════════════════════"
+
+declare -A BROWSERS
+BROWSER_NAMES=()
+
+check_browser() {
+    local name="$1"
+    local binary="$2"
+    if command -v "${binary}" &>/dev/null; then
+        # Only add name once (first binary wins for each name)
+        if [[ -z "${BROWSERS[${name}]:-}" ]]; then
+            BROWSERS["${name}"]="${binary}"
+            BROWSER_NAMES+=("${name}")
+        fi
+    fi
+}
+
+check_browser "Google Chrome"       google-chrome-stable
+check_browser "Google Chrome"       google-chrome
+check_browser "Chromium"            chromium
+check_browser "Chromium"            chromium-browser
+check_browser "Ungoogled Chromium"  ungoogled-chromium
+check_browser "Brave"               brave-browser
+check_browser "Microsoft Edge"      microsoft-edge-stable
+check_browser "Microsoft Edge"      microsoft-edge
+check_browser "Vivaldi"             vivaldi-stable
+check_browser "Vivaldi"             vivaldi
+
+SELECTED_BROWSER=""
+SELECTED_BINARY=""
+
+if [[ ${#BROWSER_NAMES[@]} -eq 0 ]]; then
+    echo ""
+    fail "No supported Chromium-based browser found"
+    fail "Install one of: Google Chrome, Chromium, Brave, Edge, Vivaldi"
+    fail "The webAuthenticationProxy API is Chromium-only — Firefox is not supported"
+    FAILED=1
+else
+    echo ""
+    info "Found ${#BROWSER_NAMES[@]} supported browser(s):"
+    for name in "${BROWSER_NAMES[@]}"; do
+        echo "      - ${name} (${BROWSERS[${name}]})"
+    done
+
+    if [[ ${#BROWSER_NAMES[@]} -eq 1 ]]; then
+        SELECTED_BROWSER="${BROWSER_NAMES[0]}"
+        SELECTED_BINARY="${BROWSERS[${SELECTED_BROWSER}]}"
+        info "Using: ${SELECTED_BROWSER}"
+    else
+        echo ""
+        echo "  Multiple browsers detected. Which would you like to use?"
+        select choice in "${BROWSER_NAMES[@]}"; do
+            if [[ -n "${choice}" ]]; then
+                SELECTED_BROWSER="${choice}"
+                SELECTED_BINARY="${BROWSERS[${choice}]}"
+                break
+            fi
+        done
+    fi
+
+    echo ""
+    echo "  ────────────────────────────────────────────────────────"
+    echo "  We will now open ${SELECTED_BROWSER} to load the extension."
+    echo "  Follow each step carefully."
+    echo "  ────────────────────────────────────────────────────────"
+    echo ""
+    read -rp "  Press Enter when you are ready to continue..."
+
+    # Step 1 — Open browser to extensions page
+    echo ""
+    info "Step 1: Opening ${SELECTED_BROWSER} to the extensions page..."
+    "${SELECTED_BINARY}" "chrome://extensions/" &>/dev/null &
+    sleep 2
+    echo ""
+    read -rp "  Press Enter once the browser is open and you can see chrome://extensions/..."
+
+    # Step 2 — Developer mode
+    echo ""
+    echo "  Step 2: Enable Developer Mode"
+    echo "  Look for the 'Developer mode' toggle in the top right corner"
+    echo "  of the extensions page and turn it ON."
+    echo ""
+    read -rp "  Press Enter once Developer Mode is enabled..."
+
+    # Step 3 — Load unpacked
+    echo ""
+    echo "  Step 3: Load the extension"
+    echo "  Click the 'Load unpacked' button that appeared after enabling"
+    echo "  Developer Mode."
+    echo ""
+    echo "  When the folder picker opens, navigate to:"
+    echo "      ${REPO_ROOT}/extension"
+    echo ""
+    read -rp "  Press Enter once you have selected the extension folder..."
+
+    # Step 4 — Get extension ID
+    echo ""
+    echo "  Step 4: Copy your Extension ID"
+    echo "  The WebAuthn Proxy extension should now appear on the page."
+    echo "  Under the extension name you will see an ID that looks like:"
+    echo "      abcdefghijklmnopabcdefghijklmnop"
+    echo "  (32 characters, lowercase letters a through p only)"
+    echo ""
+
+    EXTENSION_ID=""
+    while true; do
+        read -rp "  Paste your Extension ID here: " EXTENSION_ID
+        if [[ "${EXTENSION_ID}" =~ ^[a-p]{32}$ ]]; then
+            ok "Valid Extension ID: ${EXTENSION_ID}"
+            break
+        else
+            echo ""
+            fail "Invalid format — must be exactly 32 characters using only letters a-p"
+            echo "  Please check the ID and try again."
+            echo ""
+        fi
+    done
+
+    # Apply extension ID to all manifest files
+    UPDATED=0
+    for f in \
+        "${CHROME_NMH_DIR}/com.webauthnproxy.host.json" \
+        "${CHROMIUM_NMH_DIR}/com.webauthnproxy.host.json" \
+        "${HOME}/.config/google-chrome/NativeMessagingHosts/com.webauthnproxy.host.json" \
+        "${HOME}/.config/chromium/NativeMessagingHosts/com.webauthnproxy.host.json"
+    do
+        if [[ -f "${f}" ]]; then
+            sudo sed -i "s|EXTENSION_ID_PLACEHOLDER|${EXTENSION_ID}|g" "${f}"
+            ok "Updated: ${f}"
+            UPDATED=1
+        fi
+    done
+
+    if [[ "${UPDATED}" -eq 0 ]]; then
+        fail "No manifest files found to update"
+        FAILED=1
+    fi
+
+    # Step 5 — Reload extension
+    echo ""
+    echo "  Step 5: Reload the extension"
+    echo "  Go back to chrome://extensions/ and click the"
+    echo "  refresh/reload icon on the WebAuthn Proxy extension card."
+    echo ""
+    read -rp "  Press Enter once you have reloaded the extension..."
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
+# PHASE 8 — FINAL HEALTH CHECK
+# ════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo " Phase 8 — Final Health Check"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+
+# [1/8] Secure Boot
+echo "[1/8] Secure Boot..."
+SB_FINAL="$(detect_secure_boot_state)"
+case "${SB_FINAL}" in
+    enabled) ok "Secure Boot is enabled" ;;
+    *)       warn "Secure Boot is not enabled — key protection is reduced" ;;
+esac
+
+# [2/8] TPM2
+echo "[2/8] TPM2..."
+if [[ -c /dev/tpm0 && -c /dev/tpmrm0 ]]; then
+    ok "TPM2 present"
+else
+    fail "TPM2 not found"
+    FAILED=1
+fi
+
+# [3/8] Binaries
+echo "[3/8] Binaries..."
+for bin in "${HOST_BINARY}" "${DAEMON_BINARY}" "${TRAY_BINARY}"; do
+    if [[ -x "/usr/local/bin/${bin}" ]]; then
+        ok "/usr/local/bin/${bin}"
+    else
+        fail "/usr/local/bin/${bin} missing"
+        FAILED=1
+    fi
+done
+
+# [4/8] Configuration files
+echo "[4/8] Configuration..."
+for f in \
+    "${TRUSTED_HASHES}" \
+    "${BOOTSTRAP_KEY}" \
+    "${PAM_SERVICE}" \
+    "/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf"
+do
+    if sudo test -f "${f}"; then
+        ok "${f}"
+    else
+        fail "${f} missing"
+        FAILED=1
+    fi
+done
+
+# [5/8] Extension ID
+echo "[5/8] Extension ID..."
+ID_SET=0
+for f in \
+    "${CHROME_NMH_DIR}/com.webauthnproxy.host.json" \
+    "${CHROMIUM_NMH_DIR}/com.webauthnproxy.host.json"
+do
+    if [[ -f "${f}" ]] && ! grep -q "EXTENSION_ID_PLACEHOLDER" "${f}"; then
+        ok "Extension ID configured in ${f}"
+        ID_SET=1
+    fi
+done
+if [[ "${ID_SET}" -eq 0 ]]; then
+    fail "Extension ID not set in any manifest"
+    FAILED=1
+fi
+
+# [6/8] Binary integrity
+echo "[6/8] Binary integrity..."
+if command -v python3 &>/dev/null; then
+    sudo python3 - << 'PYEOF'
+import json, hashlib, sys
+try:
+    with open("/etc/webauthn-proxy/trusted-binaries.json") as f:
+        entries = json.load(f)
+    all_ok = True
+    for entry in entries:
+        with open(entry["path"], "rb") as bf:
+            actual = hashlib.sha256(bf.read()).hexdigest()
+        if actual == entry["sha256"]:
+            print(f"  \u2713 {entry['path']}")
+        else:
+            print(f"  \u2717 {entry['path']} \u2014 hash mismatch", file=sys.stderr)
+            all_ok = False
+    sys.exit(0 if all_ok else 1)
+except Exception as e:
+    print(f"  ! Could not verify hashes: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+    [[ $? -eq 0 ]] || FAILED=1
+else
+    warn "python3 not found — skipping hash verification"
+fi
+
+# [7/8] Daemon service
+echo "[7/8] Daemon service..."
+if systemctl is-active --quiet webauthn-proxy-daemon; then
+    ok "webauthn-proxy-daemon is running"
+else
+    fail "webauthn-proxy-daemon is not running"
+    FAILED=1
+fi
+
+# [8/8] Tray service
+echo "[8/8] Tray service..."
+if XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
+   DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
+   systemctl --user is-active --quiet webauthn-proxy-tray 2>/dev/null; then
+    ok "webauthn-proxy-tray is running"
+else
+    warn "webauthn-proxy-tray is not running"
+    warn "Start with: systemctl --user start webauthn-proxy-tray"
+fi
+
+# ── Final summary ─────────────────────────────────────────────────────────
+echo ""
+echo "════════════════════════════════════════════════════════════"
+if [[ "${FAILED}" -eq 0 ]]; then
+    echo " Installation complete — all checks passed."
+    echo ""
+    echo " Test the proxy:"
+    echo "   1. Open https://webauthn.io in ${SELECTED_BROWSER:-your browser}"
+    echo "   2. Enter a username and click Register"
+    echo "   3. You will be prompted for your Linux password or PIN"
+    echo "   4. Complete registration then test Sign In"
+    echo ""
+    echo " Live logs:"
+    echo "   journalctl -u webauthn-proxy-daemon -f"
+    echo "   tail -f /tmp/webauthn-proxy-host.log"
+else
+    echo " Installation completed with errors — review the output above."
+    echo " Fix any failed checks and run ./scripts/install.sh again."
+fi
+echo "════════════════════════════════════════════════════════════"
+echo ""
