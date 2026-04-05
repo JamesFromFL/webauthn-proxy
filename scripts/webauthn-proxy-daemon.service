@@ -6,6 +6,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/webauthn-proxy-daemon
+Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 Restart=on-failure
 RestartSec=5s
 

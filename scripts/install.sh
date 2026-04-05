@@ -83,6 +83,14 @@ CARGO="$(find_cargo)" || die "cargo not found. Install Rust from rustup.rs then 
 export PATH="$(dirname "${CARGO}"):${PATH}"
 echo "    Using cargo: ${CARGO}"
 
+# Resolve the real invoking user early — needed for builds and tray install
+if [[ -n "${SUDO_USER}" ]]; then
+    REAL_USER="${SUDO_USER}"
+else
+    REAL_USER="${USER}"
+fi
+REAL_USER_HOME=$(getent passwd "${REAL_USER}" | cut -d: -f6)
+
 # ---------------------------------------------------------------------------
 # 0. Preflight: Secure Boot + TPM2
 # ---------------------------------------------------------------------------
@@ -123,7 +131,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "==> Building ${HOST_BINARY} (release)..."
 cd "${REPO_ROOT}/native-host"
-$CARGO build --release
+sudo -u "${REAL_USER}" env PATH="$(dirname ${CARGO}):$PATH" HOME="${REAL_USER_HOME}" $CARGO build --release
 echo "    Build complete."
 
 # ---------------------------------------------------------------------------
@@ -131,7 +139,7 @@ echo "    Build complete."
 # ---------------------------------------------------------------------------
 echo "==> Building ${DAEMON_BINARY} (release)..."
 cd "${REPO_ROOT}/daemon"
-$CARGO build --release
+sudo -u "${REAL_USER}" env PATH="$(dirname ${CARGO}):$PATH" HOME="${REAL_USER_HOME}" $CARGO build --release
 echo "    Build complete."
 
 # ---------------------------------------------------------------------------
@@ -233,7 +241,7 @@ echo "    Service enabled. Start with: systemctl start webauthn-proxy-daemon"
 # ---------------------------------------------------------------------------
 echo "==> Building ${TRAY_BINARY} (release)..."
 cd "${REPO_ROOT}/systray"
-$CARGO build --release
+sudo -u "${REAL_USER}" env PATH="$(dirname ${CARGO}):$PATH" HOME="${REAL_USER_HOME}" $CARGO build --release
 echo "    Build complete."
 
 install -m 0755 "${REPO_ROOT}/systray/target/release/${TRAY_BINARY}" "${TRAY_DEST}"
@@ -244,13 +252,6 @@ echo "    ${TRAY_DEST}"
 # ------------------------------------------------------------
 echo "==> Installing tray user service..."
 
-if [[ -n "${SUDO_USER}" ]]; then
-    REAL_USER="${SUDO_USER}"
-else
-    REAL_USER="${USER}"
-fi
-
-REAL_USER_HOME=$(getent passwd "${REAL_USER}" | cut -d: -f6)
 REAL_USER_ID=$(id -u "${REAL_USER}")
 REAL_XDG_RUNTIME="/run/user/${REAL_USER_ID}"
 REAL_DBUS="unix:path=${REAL_XDG_RUNTIME}/bus"

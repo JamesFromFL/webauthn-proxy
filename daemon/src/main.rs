@@ -4,7 +4,7 @@
 //   1. Initialise file logger (never stdout/stderr in production)
 //   2. Enforce prerequisites (Secure Boot, TPM2, binary integrity)
 //   3. Build shared daemon state (session store, replay cache, bootstrap key)
-//   4. Register D-Bus service "com.webauthnproxy.Daemon" on the session bus
+//   4. Register D-Bus service "com.webauthnproxy.Daemon" on the system bus
 //   5. Run the tokio event loop indefinitely
 
 use std::sync::Arc;
@@ -71,7 +71,7 @@ async fn main() {
     // ── D-Bus service ─────────────────────────────────────────────────────
     let interface = DaemonInterface::new(Arc::clone(&state));
 
-    let conn = match zbus::connection::Builder::session()
+    let conn = match zbus::connection::Builder::system()
         .and_then(|b| b.name("com.webauthnproxy.Daemon"))
         .and_then(|b| b.serve_at("/com/webauthnproxy/Daemon", interface))
     {
