@@ -10,10 +10,15 @@
 use std::sync::Arc;
 use log::{error, info};
 
+mod authentication;
+mod credentials;
 mod crypto;
+mod crypto_ops;
 mod dbus_interface;
 mod pam;
 mod prereqs;
+mod protocol;
+mod registration;
 mod replay;
 mod session;
 mod tpm;

@@ -18,7 +18,10 @@ use std::sync::Arc;
 use log::{debug, info, warn};
 use zeroize::Zeroizing;
 
+use crate::authentication;
 use crate::crypto;
+use crate::protocol::{CreateRequest, GetRequest};
+use crate::registration;
 use crate::replay::AsyncReplayCache;
 use crate::session::{load_bootstrap_key, SessionStore};
 use crate::validator;
@@ -133,15 +136,17 @@ impl DaemonInterface {
             ));
         }
 
-        // TODO: dispatch to registration handler (integration with native-host
-        // crypto and PAM layers — pending Layer 2/3/4 integration pass)
-        info!("[dbus] Register: dispatching registration for pid={pid} (stub)");
-        let stub_response = serde_json::json!({
-            "status": "ok",
-            "message": "Registration handler not yet integrated"
-        });
-        let response_bytes = serde_json::to_vec(&stub_response)
-            .map_err(|e| zbus::fdo::Error::Failed(format!("Serialise response: {e}")))?;
+        // Deserialise and dispatch to the registration handler
+        let create_req: CreateRequest = serde_json::from_slice(&envelope.payload)
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("Bad CreateRequest: {e}")))?;
+
+        info!("[dbus] Register: dispatching registration for pid={pid}");
+        let create_resp = registration::handle_create(create_req)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Registration failed: {e}")))?;
+
+        let response_bytes = serde_json::to_vec(&create_resp)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Serialise CreateResponse: {e}")))?;
 
         // Encrypt response
         self.encrypt_with_session(pid, &response_bytes)
@@ -182,14 +187,17 @@ impl DaemonInterface {
             ));
         }
 
-        // TODO: dispatch to authentication handler
-        info!("[dbus] Authenticate: dispatching authentication for pid={pid} (stub)");
-        let stub_response = serde_json::json!({
-            "status": "ok",
-            "message": "Authentication handler not yet integrated"
-        });
-        let response_bytes = serde_json::to_vec(&stub_response)
-            .map_err(|e| zbus::fdo::Error::Failed(format!("Serialise response: {e}")))?;
+        // Deserialise and dispatch to the authentication handler
+        let get_req: GetRequest = serde_json::from_slice(&envelope.payload)
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("Bad GetRequest: {e}")))?;
+
+        info!("[dbus] Authenticate: dispatching authentication for pid={pid}");
+        let get_resp = authentication::handle_get(get_req)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Authentication failed: {e}")))?;
+
+        let response_bytes = serde_json::to_vec(&get_resp)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Serialise GetResponse: {e}")))?;
 
         self.encrypt_with_session(pid, &response_bytes)
             .await

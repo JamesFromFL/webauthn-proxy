@@ -1,0 +1,117 @@
+// protocol.rs — Serde types for the Chrome Native Messaging wire format.
+//
+// Mirrors native-host/src/protocol.rs exactly so the daemon can deserialise
+// CreateRequest / GetRequest and serialise CreateResponse / GetResponse.
+// All binary WebAuthn fields are carried as base64url strings.
+
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Registration (create)
+// ---------------------------------------------------------------------------
+
+/// Incoming registration request forwarded from the extension.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRequest {
+    pub request_id:       String,
+    pub rp_id:            String,
+    #[serde(default)]
+    pub rp_name:          String,
+    pub challenge:        String,         // base64url
+    #[serde(default)]
+    pub user_id:          String,         // base64url
+    #[serde(default)]
+    pub user_name:        String,
+    pub client_data_json: String,         // raw JSON string from extension
+}
+
+/// Full create response returned to the native host.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateResponse {
+    pub response: PublicKeyCredentialCreate,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicKeyCredentialCreate {
+    pub id:                       String,   // base64url credential ID
+    pub raw_id:                   String,   // base64url credential ID (WebAuthn duplicate)
+    #[serde(rename = "type")]
+    pub type_:                    String,   // "public-key"
+    pub response:                 AttestationResponse,
+    pub authenticator_attachment: String,   // "platform"
+    pub client_extension_results: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttestationResponse {
+    pub client_data_json:   String,         // base64url
+    pub attestation_object: String,         // base64url CBOR-encoded attObj
+    pub transports:         Vec<String>,    // ["internal"]
+}
+
+// ---------------------------------------------------------------------------
+// Authentication (get)
+// ---------------------------------------------------------------------------
+
+/// Incoming authentication request forwarded from the extension.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetRequest {
+    pub request_id:        String,
+    pub rp_id:             String,
+    pub challenge:         String,          // base64url
+    pub client_data_json:  String,          // raw JSON string from extension
+    #[serde(default)]
+    pub allow_credentials: Vec<AllowCredential>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AllowCredential {
+    pub id:    String,   // base64url
+    #[serde(rename = "type", default)]
+    pub type_: String,   // "public-key"
+}
+
+/// Full get response returned to the native host.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetResponse {
+    pub response: PublicKeyCredentialGet,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicKeyCredentialGet {
+    pub id:                       String,   // base64url credential ID
+    pub raw_id:                   String,
+    #[serde(rename = "type")]
+    pub type_:                    String,   // "public-key"
+    pub response:                 AssertionResponse,
+    pub authenticator_attachment: String,   // "platform"
+    pub client_extension_results: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssertionResponse {
+    pub client_data_json:   String,         // base64url
+    pub authenticator_data: String,         // base64url
+    pub signature:          String,         // base64url DER-encoded ECDSA P-256
+    pub user_handle:        Option<String>, // base64url (may be absent)
+}
+
+// ---------------------------------------------------------------------------
+// On-disk credential metadata (no private key material)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CredentialMeta {
+    pub credential_id: String,   // hex
+    pub rp_id:         String,
+    pub user_id:       String,   // base64url
+    pub user_name:     String,
+    pub sign_count:    u32,
+    pub created_at:    u64,      // Unix timestamp (seconds)
+}

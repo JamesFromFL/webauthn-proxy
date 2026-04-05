@@ -17,6 +17,7 @@ zbus       = { version = "4",    features = ["tokio"] }
 tokio      = { version = "1",    features = ["full"] }
 zeroize    = { version = "1",    features = ["derive"] }
 rand       = "0.8"
+base64     = "0.21"
 hmac       = "0.12"
 sha2       = "0.10"
 aes-gcm    = "0.10"
