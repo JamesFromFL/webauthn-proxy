@@ -1,5 +1,5 @@
 # WebAuthn Proxy
-![WebAuthn Proxy](assets/AuthnProxyLogoCircle.png)
+![WebAuthn Proxy](assets/AuthnProxyLogoStylized.png)
 
 Linux has no built-in way to satisfy modern browser security checks that Windows and Mac handle automatically. This project fills that gap — it lets Chrome on Linux use your system's built-in security hardware to handle authentication requests that would otherwise just fail.
 
@@ -24,13 +24,14 @@ When a website or browser extension asks for secure authentication, the proxy in
 - **Browser Extension** — watches for authentication requests in Chrome and routes them into the proxy instead of letting them fail
 - **Native Host** — the bridge between the browser and your system, translates browser messages into system calls
 - **Daemon** — the always-running background service that handles the actual security work: verifying you, protecting your keys, and signing responses
-- **Installer** — one script that builds everything, sets up the service, and walks you through the final steps
+- **System Tray** — a status indicator that shows the proxy is running and visible from your desktop
+- **Installer** — one script that builds everything, installs all components, handles Secure Boot and TPM checks, walks you through loading the extension, and runs a full health check automatically
 
 ## Disclaimer
 
 This project was built by a cybersecurity student as a learning exercise in platform security and authentication. It was born out of a personal need — Linux had no working solution for a problem I ran into daily, so I built one.
 
-This project is in early development. The code has not been audited. There are known unfinished components — TPM2 hardware key sealing is currently stubbed with a software fallback, and MOK binary signing is not yet implemented.
+This project is in early development. The code has not been audited. There are known unfinished components — TPM2 hardware key sealing with PCR boot-state binding is currently using a software fallback.
 
 Installation and daily use is not recommended at this stage. If you choose to install and use this software, you do so entirely at your own risk.
 
@@ -54,15 +55,18 @@ If you find a security issue please open a GitHub issue or contact me directly b
 - P-256 cryptographic key generation and ECDSA signing
 - Credential storage and lifecycle management
 - Hardened systemd service with strict permissions and memory protections
-- Install script with hardware prerequisite checks
+- Guided installer with Secure Boot detection and setup
+- TPM2 verification and prerequisite enforcement
+- Per-file EFI signing with sbctl --save for automatic re-signing on updates
+- Browser extension guided setup with automatic extension ID configuration
+- System tray indicator showing proxy is running
+- Full 8-point health check on every install
+- Uninstall script
 
 ### In Progress
 - TPM2 hardware key sealing with PCR boot-state binding — software fallback is active in the meantime
-- MOK binary signing so Secure Boot verifies the installed binaries
-- Secure Boot hard enforcement — currently a warning, will become a hard exit
 
 ### Planned — Linux Platform
-- System tray app showing proxy status and enrolled credentials
 - Credential management UI
 - Full TPM2 integration with PCR 0, 7, and 11 binding
 - Fingerprint authentication via fprintd
@@ -76,16 +80,18 @@ Pair your phone with your Linux machine. When a site requests authentication you
 
 1. Clone the repo: `git clone https://github.com/JamesFromFL/webauthn-proxy`
 2. Run the installer: `sudo ./scripts/install.sh`
-3. Load the extension in Chrome: go to `chrome://extensions` → enable Developer mode → Load unpacked → select the `extension/` folder
-4. Copy your extension ID from `chrome://extensions` and run the `sed` command the installer printed
-5. Start the daemon: `systemctl start webauthn-proxy-daemon`
-6. Test it — try unlocking a NordPass TOTP code on Linux
+3. Follow the on-screen prompts — the installer handles building, installing, Secure Boot checks, TPM verification, extension loading, and a final health check automatically.
 
 ## Logs and Troubleshooting
 
-- Daemon logs: `journalctl -u webauthn-proxy-daemon`
-- Native host logs: `/tmp/webauthn-proxy-host.log`
-- Extension logs: open Chrome DevTools on the background service worker from `chrome://extensions`
+- Daemon logs: `journalctl -u webauthn-proxy-daemon -f`
+- Native host logs: `tail -f /tmp/webauthn-proxy-host.log`
+- Extension logs: Chrome DevTools on the background service worker at `chrome://extensions/`
+- Tray logs: `journalctl --user -u webauthn-proxy-tray -f`
+
+## Testing
+
+Open [https://webauthn.io](https://webauthn.io), enter a username, click Register, and follow the prompts. You should be asked for your Linux password or PIN. Complete registration then test Sign In to confirm the full flow works.
 
 ## License
 
