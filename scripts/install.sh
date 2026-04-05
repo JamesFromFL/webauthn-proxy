@@ -40,6 +40,31 @@ CHROMIUM_NMH_DIR="/etc/chromium/native-messaging-hosts"
 die() { echo "FATAL: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# Cargo detection — sudo resets PATH and loses the rustup shim
+# ---------------------------------------------------------------------------
+INVOKING_USER="${SUDO_USER:-${USER:-}}"
+CARGO=""
+for candidate in \
+    "${HOME}/.cargo/bin/cargo" \
+    "/home/${INVOKING_USER}/.cargo/bin/cargo" \
+    "${HOME}/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo" \
+    "/usr/bin/cargo" \
+    "$(which cargo 2>/dev/null || true)"; do
+    if [[ -x "${candidate}" ]]; then
+        CARGO="${candidate}"
+        break
+    fi
+done
+
+if [[ -z "${CARGO}" ]]; then
+    die "cargo not found. Install Rust via rustup.rs or run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+fi
+
+export CARGO
+export PATH="$(dirname "${CARGO}"):${PATH}"
+echo "    Using cargo: ${CARGO}"
+
+# ---------------------------------------------------------------------------
 # 0. Preflight: Secure Boot + TPM2
 # ---------------------------------------------------------------------------
 echo "==> Checking hardware prerequisites..."
@@ -79,7 +104,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "==> Building ${HOST_BINARY} (release)..."
 cd "${REPO_ROOT}/native-host"
-cargo build --release
+$CARGO build --release
 echo "    Build complete."
 
 # ---------------------------------------------------------------------------
@@ -87,7 +112,7 @@ echo "    Build complete."
 # ---------------------------------------------------------------------------
 echo "==> Building ${DAEMON_BINARY} (release)..."
 cd "${REPO_ROOT}/daemon"
-cargo build --release
+$CARGO build --release
 echo "    Build complete."
 
 # ---------------------------------------------------------------------------
@@ -189,7 +214,7 @@ echo "    Service enabled. Start with: systemctl start webauthn-proxy-daemon"
 # ---------------------------------------------------------------------------
 echo "==> Building ${TRAY_BINARY} (release)..."
 cd "${REPO_ROOT}/systray"
-cargo build --release
+$CARGO build --release
 echo "    Build complete."
 
 install -m 0755 "${REPO_ROOT}/systray/target/release/${TRAY_BINARY}" "${TRAY_DEST}"
