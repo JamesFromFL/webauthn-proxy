@@ -17,14 +17,7 @@ use std::io::Read;
 pub fn enforce_prereqs() -> Result<(), String> {
     let mut failures: Vec<String> = Vec::new();
 
-    match check_secure_boot() {
-        Ok(()) => info!("[prereqs] Secure Boot: OK"),
-        Err(e) => {
-            warn!("[prereqs] Secure Boot: {}", e);
-            // Non-fatal in development — warn but do not block startup.
-            // Promote to failure in production by pushing to `failures`.
-        }
-    }
+    check_secure_boot();
 
     match check_tpm2_present() {
         Ok(()) => info!("[prereqs] TPM2 present: OK"),
@@ -60,30 +53,55 @@ pub fn enforce_prereqs() -> Result<(), String> {
 // Individual checks
 // ---------------------------------------------------------------------------
 
-/// Verify Secure Boot is enabled by reading the EFI variable.
+/// Verify Secure Boot is enabled and enforcing.  Hard-exits on any failure.
 ///
-/// The SecureBoot variable lives at:
-///   /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
-///
-/// The EFI variable format: 4-byte attribute header, then the value byte.
-/// Value byte == 1 means Secure Boot is enabled.
-pub fn check_secure_boot() -> Result<(), String> {
-    let var_path = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
+/// Exit conditions:
+///   - System is not UEFI (efivars path absent)
+///   - SecureBoot EFI variable is unreadable or missing
+///   - SecureBoot EFI variable is malformed
+///   - Secure Boot is disabled (value byte != 1)
+///   - Secure Boot is in Setup Mode (not enforcing)
+pub fn check_secure_boot() {
+    const EFI_VAR: &str =
+        "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    const SETUP_MODE_VAR: &str =
+        "/sys/firmware/efi/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c";
 
-    let data = std::fs::read(var_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            "EFI variable not found — system may not be UEFI or may not expose efivars".to_string()
-        } else {
-            format!("Cannot read SecureBoot EFI variable: {e}")
-        }
-    })?;
-
-    // Bytes 0–3: EFI_VARIABLE_ATTRIBUTES (u32 LE).  Byte 4: value.
-    match data.get(4) {
-        Some(&1) => Ok(()),
-        Some(&v) => Err(format!("Secure Boot is disabled (value={v})")),
-        None => Err("SecureBoot EFI variable is too short to parse".to_string()),
+    // Check UEFI availability
+    if !std::path::Path::new("/sys/firmware/efi/efivars").exists() {
+        error!("[prereqs] FATAL: System is not UEFI. Secure Boot cannot be verified. Daemon will not start on non-UEFI systems.");
+        std::process::exit(1);
     }
+
+    // Read Secure Boot variable
+    let sb_bytes = match std::fs::read(EFI_VAR) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("[prereqs] FATAL: Cannot read Secure Boot EFI variable: {e}. Ensure efivars is mounted and the variable exists.");
+            std::process::exit(1);
+        }
+    };
+
+    // EFI var format: 4 bytes attributes + value bytes. Secure Boot value is at byte index 4.
+    if sb_bytes.len() < 5 {
+        error!("[prereqs] FATAL: Secure Boot EFI variable is malformed (too short).");
+        std::process::exit(1);
+    }
+
+    if sb_bytes[4] != 1 {
+        error!("[prereqs] FATAL: Secure Boot is disabled. The daemon requires Secure Boot to be enabled to protect boot-time integrity. Enable Secure Boot in your BIOS/UEFI settings and reboot.");
+        std::process::exit(1);
+    }
+
+    // Check Setup Mode — Secure Boot in setup mode is not enforcing
+    if let Ok(sm_bytes) = std::fs::read(SETUP_MODE_VAR) {
+        if sm_bytes.len() >= 5 && sm_bytes[4] == 1 {
+            error!("[prereqs] FATAL: Secure Boot is in Setup Mode (not enforcing). Enroll your keys and exit Setup Mode before running the daemon.");
+            std::process::exit(1);
+        }
+    }
+
+    info!("[prereqs] Secure Boot: OK");
 }
 
 /// Check that /dev/tpm0 and /dev/tpmrm0 exist and are accessible.
