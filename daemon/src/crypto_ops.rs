@@ -73,9 +73,21 @@ pub fn sign_assertion(
 // rpIdHash
 // ---------------------------------------------------------------------------
 
-/// SHA-256 of the RP ID string, as required by the WebAuthn spec.
+/// SHA-256 of the full origin for the RP ID.
+///
+/// For Chrome extensions the origin is `chrome-extension://{rp_id}`.
+/// If the caller has already included a scheme (`://` present) the value is
+/// used verbatim.  Plain host strings are assumed to be Chrome extension IDs.
 pub fn compute_rp_id_hash(rp_id: &str) -> [u8; 32] {
-    Sha256::digest(rp_id.as_bytes()).into()
+    let full_origin = if rp_id.contains("://") {
+        rp_id.to_string()
+    } else {
+        format!("chrome-extension://{}", rp_id)
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(full_origin.as_bytes());
+    hasher.finalize().into()
 }
 
 // ---------------------------------------------------------------------------
