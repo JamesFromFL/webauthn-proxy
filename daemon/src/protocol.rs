@@ -6,6 +6,25 @@
 
 use serde::{Deserialize, Serialize};
 
+mod string_or_int {
+    use serde::{self, Deserialize, Deserializer};
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum StringOrInt {
+            String(String),
+            Int(i64),
+        }
+        match StringOrInt::deserialize(deserializer)? {
+            StringOrInt::String(s) => Ok(s),
+            StringOrInt::Int(i) => Ok(i.to_string()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration (create)
 // ---------------------------------------------------------------------------
@@ -14,6 +33,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRequest {
+    #[serde(deserialize_with = "string_or_int::deserialize")]
     pub request_id:       String,
     pub rp_id:            String,
     #[serde(default)]
@@ -23,6 +43,7 @@ pub struct CreateRequest {
     pub user_id:          String,         // base64url
     #[serde(default)]
     pub user_name:        String,
+    #[serde(rename = "clientDataJSON")]
     pub client_data_json: String,         // raw JSON string from extension
 }
 
@@ -47,6 +68,7 @@ pub struct PublicKeyCredentialCreate {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttestationResponse {
+    #[serde(rename = "clientDataJSON")]
     pub client_data_json:   String,         // base64url
     pub attestation_object: String,         // base64url CBOR-encoded attObj
     pub transports:         Vec<String>,    // ["internal"]
@@ -60,9 +82,11 @@ pub struct AttestationResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetRequest {
+    #[serde(deserialize_with = "string_or_int::deserialize")]
     pub request_id:        String,
     pub rp_id:             String,
     pub challenge:         String,          // base64url
+    #[serde(rename = "clientDataJSON")]
     pub client_data_json:  String,          // raw JSON string from extension
     #[serde(default)]
     pub allow_credentials: Vec<AllowCredential>,
@@ -96,6 +120,7 @@ pub struct PublicKeyCredentialGet {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssertionResponse {
+    #[serde(rename = "clientDataJSON")]
     pub client_data_json:   String,         // base64url
     pub authenticator_data: String,         // base64url
     pub signature:          String,         // base64url DER-encoded ECDSA P-256
