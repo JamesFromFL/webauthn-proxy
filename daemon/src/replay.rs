@@ -136,4 +136,15 @@ impl AsyncReplayCache {
     ) -> Result<(), ReplayError> {
         self.inner.lock().await.check_and_record(sequence, timestamp_secs)
     }
+
+    /// Clear all seen sequence numbers.
+    ///
+    /// Called on Connect() so that each new native host session starts with a
+    /// clean replay window — the host's sequence counter resets to 1 on each
+    /// DaemonSession::new(), and the daemon cache must match.
+    pub async fn clear_for_session(&self) {
+        let mut cache = self.inner.lock().await;
+        cache.seen.clear();
+        debug!("[replay] Cache cleared for new session");
+    }
 }

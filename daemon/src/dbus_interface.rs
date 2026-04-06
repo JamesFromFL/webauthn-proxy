@@ -89,6 +89,10 @@ impl DaemonInterface {
 
         let token_bytes = self.state.sessions.issue_token(pid).await;
 
+        // Reset the replay cache so the new session's sequence counter (which
+        // starts at 1) does not collide with numbers seen in a previous session.
+        self.state.replay_cache.clear_for_session().await;
+
         info!("[dbus] Connect successful for pid={pid}");
         Ok(token_bytes.to_vec())
     }
@@ -138,7 +142,7 @@ impl DaemonInterface {
             .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("Bad CreateRequest: {e}")))?;
 
         info!("[dbus] Register: dispatching registration for pid={pid}");
-        let create_resp = registration::handle_create(create_req)
+        let create_resp = registration::handle_create(create_req, pid)
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("Registration failed: {e}")))?;
 
@@ -189,7 +193,7 @@ impl DaemonInterface {
             .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("Bad GetRequest: {e}")))?;
 
         info!("[dbus] Authenticate: dispatching authentication for pid={pid}");
-        let get_resp = authentication::handle_get(get_req)
+        let get_resp = authentication::handle_get(get_req, pid)
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("Authentication failed: {e}")))?;
 
