@@ -66,9 +66,9 @@ async function handleCreateRequest(requestInfo) {
     options = JSON.parse(requestDetailsJson);
   } catch (err) {
     logError('Failed to parse create requestDetailsJson:', err);
-    await chrome.webAuthenticationProxy.cancelRequest(
-      { requestId },
-      { errorMessage: 'Internal error: could not parse creation options' }
+    chrome.webAuthenticationProxy.completeCreateRequest(
+      { requestId, error: { name: 'UnknownError', message: 'Internal error: could not parse creation options' } },
+      () => {}
     );
     return;
   }
@@ -95,18 +95,18 @@ async function handleCreateRequest(requestInfo) {
     response = await sendToNativeHost(message);
   } catch (err) {
     logError('Native host error during create:', err.message);
-    await chrome.webAuthenticationProxy.cancelRequest(
-      { requestId },
-      { errorMessage: `Native host error: ${err.message}` }
+    chrome.webAuthenticationProxy.completeCreateRequest(
+      { requestId, error: { name: 'UnknownError', message: `Native host error: ${err.message}` } },
+      () => {}
     );
     return;
   }
 
   if (response.status !== 'ok') {
     logError('Native host returned error during create:', response.code, response.message);
-    await chrome.webAuthenticationProxy.cancelRequest(
-      { requestId },
-      { errorMessage: response.message ?? 'Authentication failed' }
+    chrome.webAuthenticationProxy.completeCreateRequest(
+      { requestId, error: { name: 'UnknownError', message: response.message ?? 'Authentication failed' } },
+      () => {}
     );
     return;
   }
@@ -131,9 +131,9 @@ async function handleGetRequest(requestInfo) {
     options = JSON.parse(requestDetailsJson);
   } catch (err) {
     logError('Failed to parse get requestDetailsJson:', err);
-    await chrome.webAuthenticationProxy.cancelRequest(
-      { requestId },
-      { errorMessage: 'Internal error: could not parse assertion options' }
+    chrome.webAuthenticationProxy.completeGetRequest(
+      { requestId, error: { name: 'UnknownError', message: 'Internal error: could not parse assertion options' } },
+      () => {}
     );
     return;
   }
@@ -161,18 +161,18 @@ async function handleGetRequest(requestInfo) {
     response = await sendToNativeHost(message);
   } catch (err) {
     logError('Native host error during get:', err.message);
-    await chrome.webAuthenticationProxy.cancelRequest(
-      { requestId },
-      { errorMessage: `Native host error: ${err.message}` }
+    chrome.webAuthenticationProxy.completeGetRequest(
+      { requestId, error: { name: 'UnknownError', message: `Native host error: ${err.message}` } },
+      () => {}
     );
     return;
   }
 
   if (response.status !== 'ok') {
     logError('Native host returned error during get:', response.code, response.message);
-    await chrome.webAuthenticationProxy.cancelRequest(
-      { requestId },
-      { errorMessage: response.message ?? 'Authentication failed' }
+    chrome.webAuthenticationProxy.completeGetRequest(
+      { requestId, error: { name: 'UnknownError', message: response.message ?? 'Authentication failed' } },
+      () => {}
     );
     return;
   }
@@ -188,9 +188,18 @@ async function handleGetRequest(requestInfo) {
 // Proxy attachment
 // ---------------------------------------------------------------------------
 
-function attachProxy() {
+// Attach the proxy immediately so Chrome routes WebAuthn calls to this extension.
+chrome.webAuthenticationProxy.attach(() => {
+  if (chrome.runtime.lastError) {
+    logError('Failed to attach:', chrome.runtime.lastError.message);
+  } else {
+    log('Proxy attached successfully');
+  }
+});
+
+function attachListeners() {
   if (chrome.webAuthenticationProxy.onCreateRequest.hasListeners()) {
-    log('Proxy already attached, skipping.');
+    log('Listeners already registered, skipping.');
     return;
   }
 
@@ -206,13 +215,13 @@ function attachProxy() {
 
 chrome.runtime.onInstalled.addListener((details) => {
   log('Extension installed/updated, reason:', details.reason);
-  attachProxy();
+  attachListeners();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  log('Browser startup detected, attaching proxy.');
-  attachProxy();
+  log('Browser startup detected, attaching listeners.');
+  attachListeners();
 });
 
-// Attach immediately when the service worker first loads (covers unpacked reloads).
-attachProxy();
+// Register listeners immediately when the service worker first loads (covers unpacked reloads).
+attachListeners();
