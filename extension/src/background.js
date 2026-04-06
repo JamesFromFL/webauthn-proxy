@@ -1,7 +1,7 @@
 // background.js — service worker entry point; attaches the webAuthenticationProxy handler
 // and routes all WebAuthn create/get requests to the native messaging host.
 
-import { encodeBase64Url, decodeBase64Url, buildClientDataJSON, computeRpIdHash, extractFromAttestationObject, extractPublicKeyFromAuthData, coseToSpkiBase64Url } from './crypto.js';
+import { buildClientDataJSON, buildCreateResponse, buildGetResponse } from './crypto.js';
 
 const NATIVE_HOST = 'com.webauthnproxy.host';
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -87,6 +87,8 @@ async function handleCreateRequest(requestInfo) {
     rpId,
     challenge,
     clientDataJSON,
+    userId:   options.user?.id   ?? '',
+    userName: options.user?.name ?? '',
     options,
   };
 
@@ -112,34 +114,9 @@ async function handleCreateRequest(requestInfo) {
   }
 
   log('Completing create request for requestId:', requestId);
-  const attestationObject = response.response.response.attestationObject;
-  const authData = extractFromAttestationObject(attestationObject);
-  const coseKey = extractPublicKeyFromAuthData(authData);
-  const publicKey = coseToSpkiBase64Url(coseKey);
-  console.log('[DEBUG] authData:', authData);
-  console.log('[DEBUG] coseKey:', coseKey);
-  console.log('[DEBUG] publicKey (SPKI):', publicKey);
-  console.log('[DEBUG] full responseJson:', JSON.stringify({
-    ...response.response,
-    response: {
-      ...response.response.response,
-      authenticatorData: authData,
-      publicKeyAlgorithm: -7,
-      publicKey: publicKey,
-    }
-  }, null, 2));
-  await chrome.webAuthenticationProxy.completeCreateRequest({
-    requestId,
-    responseJson: JSON.stringify({
-      ...response.response,
-      response: {
-        ...response.response.response,
-        authenticatorData: authData,
-        publicKeyAlgorithm: -7,
-        publicKey,
-      }
-    }),
-  });
+  await chrome.webAuthenticationProxy.completeCreateRequest(
+    buildCreateResponse(requestId, response.response)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -202,10 +179,9 @@ async function handleGetRequest(requestInfo) {
   }
 
   log('Completing get request for requestId:', requestId);
-  await chrome.webAuthenticationProxy.completeGetRequest({
-    requestId,
-    responseJson: JSON.stringify(response.response),
-  });
+  await chrome.webAuthenticationProxy.completeGetRequest(
+    buildGetResponse(requestId, response.response)
+  );
 }
 
 // ---------------------------------------------------------------------------
