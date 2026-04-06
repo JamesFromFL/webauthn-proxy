@@ -588,7 +588,6 @@ WEBAUTHN_DIR="/etc/webauthn-proxy"
 CREDENTIAL_DIR="${WEBAUTHN_DIR}/credentials"
 KEY_DIR="${WEBAUTHN_DIR}/keys"
 TRUSTED_HASHES="${WEBAUTHN_DIR}/trusted-binaries.json"
-BOOTSTRAP_KEY="${WEBAUTHN_DIR}/bootstrap.key"
 PAM_SERVICE="/etc/pam.d/webauthn-proxy"
 SYSTEMD_UNIT="/etc/systemd/system/webauthn-proxy-daemon.service"
 DAEMON_USER="webauthn-proxy"
@@ -604,6 +603,8 @@ else
     sudo useradd --system --no-create-home --shell /usr/sbin/nologin "${DAEMON_USER}"
     ok "Created system user '${DAEMON_USER}'."
 fi
+# Add to tss group so the daemon can access TPM2 device nodes
+sudo usermod -aG tss "${DAEMON_USER}" 2>/dev/null || true
 
 # ── 4.2 Build native host ─────────────────────────────────────────────────
 echo ""
@@ -634,18 +635,6 @@ sudo install -d -m 0700 -o "${DAEMON_USER}" "${WEBAUTHN_DIR}"
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${CREDENTIAL_DIR}"
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${KEY_DIR}"
 ok "Directories ready."
-
-# ── 4.6 Generate bootstrap key (if not already present) ──────────────────
-echo ""
-if [[ ! -f "${BOOTSTRAP_KEY}" ]]; then
-    info "Generating bootstrap key at ${BOOTSTRAP_KEY}..."
-    sudo bash -c "openssl rand -hex 32 > '${BOOTSTRAP_KEY}'"
-    sudo chmod 0640 "${BOOTSTRAP_KEY}"
-    sudo chown "root:${DAEMON_USER}" "${BOOTSTRAP_KEY}"
-    ok "Bootstrap key generated."
-else
-    ok "Bootstrap key already exists at ${BOOTSTRAP_KEY}, skipping."
-fi
 
 # ── 4.7 Write initial trusted binary hashes ───────────────────────────────
 echo ""
@@ -1073,7 +1062,6 @@ done
 echo "[4/8] Configuration..."
 for f in \
     "${TRUSTED_HASHES}" \
-    "${BOOTSTRAP_KEY}" \
     "${PAM_SERVICE}" \
     "/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf"
 do
