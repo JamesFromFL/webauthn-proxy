@@ -1,10 +1,10 @@
 // background.js — service worker entry point; attaches the webAuthenticationProxy handler
 // and routes all WebAuthn create/get requests to the native messaging host.
 
-import { encodeBase64Url, decodeBase64Url, buildClientDataJSON, computeRpIdHash } from './crypto.js';
+import { encodeBase64Url, decodeBase64Url, buildClientDataJSON, computeRpIdHash, extractFromAttestationObject, extractPublicKeyFromAuthData, coseToSpkiBase64Url } from './crypto.js';
 
 const NATIVE_HOST = 'com.webauthnproxy.host';
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 30_000;
 const LOG_PREFIX = '[WebAuthn Proxy]';
 
 function log(...args) {
@@ -112,9 +112,33 @@ async function handleCreateRequest(requestInfo) {
   }
 
   log('Completing create request for requestId:', requestId);
+  const attestationObject = response.response.response.attestationObject;
+  const authData = extractFromAttestationObject(attestationObject);
+  const coseKey = extractPublicKeyFromAuthData(authData);
+  const publicKey = coseToSpkiBase64Url(coseKey);
+  console.log('[DEBUG] authData:', authData);
+  console.log('[DEBUG] coseKey:', coseKey);
+  console.log('[DEBUG] publicKey (SPKI):', publicKey);
+  console.log('[DEBUG] full responseJson:', JSON.stringify({
+    ...response.response,
+    response: {
+      ...response.response.response,
+      authenticatorData: authData,
+      publicKeyAlgorithm: -7,
+      publicKey: publicKey,
+    }
+  }, null, 2));
   await chrome.webAuthenticationProxy.completeCreateRequest({
     requestId,
-    responseJson: JSON.stringify(response.response),
+    responseJson: JSON.stringify({
+      ...response.response,
+      response: {
+        ...response.response.response,
+        authenticatorData: authData,
+        publicKeyAlgorithm: -7,
+        publicKey,
+      }
+    }),
   });
 }
 
