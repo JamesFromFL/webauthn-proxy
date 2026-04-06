@@ -63,6 +63,7 @@ If you find a security issue please open a GitHub issue or contact me directly b
   - Biometrics: manage Howdy and fprintd enrollments with nicknames
   - Mobile Bridge: placeholder — planned feature
 - 🔵 AUR package + Chrome Web Store submission
+- 🔵 Firefox extension support
 
 ### Planned — 
 - 🔵 Mobile Bridge

@@ -32,6 +32,8 @@ Supporting files:
 - `storage.js` — credential metadata only; private keys never stored here
 - `ui.js` — placeholder for future popup
 
+**Planned:** Firefox extension support. Firefox does not implement the `webAuthenticationProxy` API; a different interception mechanism will be required.
+
 ## Layer 2 — Native Host
 
 **Files:** `native-host/src/`
@@ -259,7 +261,7 @@ Extension activates (intercept fires)
     └── sends request to daemon
 Daemon receives request
     └── emits pending signal → system tray / desktop notification updates
-    └── PAM conversation starts on /dev/tty
+    └── polkit prompts user via desktop auth agent
     └── user approves
     └── TPM2 signs
     └── emits completed signal with encrypted response
@@ -353,12 +355,12 @@ webauthn-proxy/
 │       ├── main.rs               startup, prereqs, D-Bus service registration, tokio runtime
 │       ├── prereqs.rs            Secure Boot check, TPM2 check, binary hash check
 │       ├── dbus_interface.rs     com.webauthnproxy.Daemon interface, DaemonState
-│       ├── session.rs            session token issuance, mlocked storage, bootstrap key
+│       ├── session.rs            session token issuance, mlocked storage
 │       ├── validator.rs          /proc ancestry check, binary integrity, HMAC verify
 │       ├── replay.rs             sequence number cache, 30-second timestamp window
 │       ├── crypto.rs             AES-256-GCM, HMAC-SHA256, session token wrap/unwrap
-│       ├── pam.rs                async PAM via spawn_blocking, /dev/tty conversation
-│       └── tpm.rs                software fallback + tpm2 feature stubs
+│       ├── pam.rs                async polkit user presence, 3-attempt retry with exponential cooldown
+│       └── tpm.rs                real TPM2 sealing (--features tpm2), software fallback for development
 │
 └── scripts/
     ├── install.sh                build, install, hash binaries, enable systemd service

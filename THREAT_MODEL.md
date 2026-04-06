@@ -23,7 +23,7 @@ TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
 - **Secure Boot** ensures every stage of the boot chain — firmware, bootloader, kernel — is signature-verified before the OS loads. Without it, an attacker with physical access can boot a live USB and tamper with the system undetected.
 - **TPM 2.0 with PCR binding** means private keys are sealed to the measured boot state of the machine. The TPM will only release a key if the machine booted into the exact same verified state as when the key was created. A modified system — different bootloader, different kernel, Secure Boot disabled — produces different PCR values and the keys do not unseal.
 - **Without both**, TPM key sealing collapses to software-only protection: keys sealed without Secure Boot can be extracted by booting alternate media; PCR binding without Secure Boot can be spoofed by manipulating what gets measured.
-- The daemon checks both at startup and logs warnings if either is missing. Hard enforcement — refusing to operate — is planned and will be enabled once MOK binary signing is in place.
+- The daemon checks both at startup and logs warnings if either is missing. Hard enforcement — refusing to operate — is planned.
 
 ## Attack Surfaces and Mitigations
 
@@ -75,7 +75,6 @@ TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
 - The daemon runs as a dedicated system user (`webauthn-proxy`) — a user-space attacker running as a different user cannot read daemon memory.
 - The session token is transmitted over the kernel-mediated D-Bus system bus. The bus enforces the policy file before delivering the `Connect` response — the token is never present on a channel accessible to unprivileged user processes. The former bootstrap key encryption layer has been eliminated as an attack surface; D-Bus system bus isolation provides equivalent protection with a simpler trust model.
 
-
 ### 6. Binary Substitution
 
 **Threat:** Attacker replaces `/usr/local/bin/webauthn-proxy-host` or the daemon binary with a malicious version.
@@ -84,10 +83,6 @@ TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
 - The install script SHA-256 hashes both binaries and writes them to `/etc/webauthn-proxy/trusted-binaries.json`.
 - The daemon verifies both hashes at startup and refuses to issue session tokens if either hash does not match.
 - Both binaries are installed as root-owned and are not writable by the daemon user.
-
-**Planned:**
-- MOK (Machine Owner Key) signing of both binaries — Secure Boot will then verify them at the kernel module level before they can execute.
-- An attacker cannot replace the binaries without the MOK private key even with root access.
 
 ### 7. Boot-Time Tampering
 
@@ -161,6 +156,5 @@ If a user is physically forced to authenticate, no software solution can prevent
 
 These are honest gaps in the current implementation, not omissions from the design:
 
-- **MOK binary signing is not yet implemented.** Binary substitution protection is detection-only at runtime via hash verification. It is not boot-time prevention. Until MOK signing is in place, a root attacker who modifies a binary before the daemon starts will not be caught until startup.
-- **Secure Boot enforcement is currently a warning, not a hard exit.** The daemon checks the Secure Boot EFI variable at startup and logs a warning if it is disabled, but continues running. Hard enforcement will be enabled alongside MOK signing so the binaries can pass the check they require.
+- **Secure Boot enforcement is currently a warning, not a hard exit.** The daemon checks the Secure Boot EFI variable at startup and logs a warning if it is disabled, but continues running. Hard enforcement is planned.
 - **The mobile bridge does not exist yet.** The threat model for it in this document is speculative design intent. It will be updated when the feature is implemented.
