@@ -114,30 +114,26 @@ Modules:
 - `replay.rs` — sequence number cache, timestamp window enforcement, async mutex
 - `crypto.rs` — AES-256-GCM encrypt/decrypt, HMAC-SHA256
 - `dbus_interface.rs` — zbus interface definition, `DaemonState` (SessionStore + ReplayCache)
-- `pam.rs` — async PAM via `spawn_blocking`, `/dev/tty` conversation handler, echo-off PIN input
-- `tpm.rs` — software fallback with loud warnings, `#[cfg(feature = "tpm2")]` stubs for PCR sealing
+- `pam.rs` — async user presence via polkit pkcheck, 3-attempt retry with exponential cooldown brute-force protection
+- `tpm.rs` — real TPM2 sealing under `--features tpm2`, software fallback for development/CI
 
 ## Layer 5 — Authentication Backend
 
-### PAM (User Presence)
+### Polkit (User Presence)
 
-Every registration and authentication request is gated by PAM before any key material is touched. The daemon uses PAM service name `webauthn-proxy` configured in `/etc/pam.d/webauthn-proxy`. The conversation handler reads prompts from `/dev/tty` so it never touches the D-Bus or Native Messaging channels. Supports password, PIN, fingerprint via fprintd, and face recognition via Howdy — whatever the PAM stack is configured to use.
+Every registration and authentication request is gated by polkit before any key material is touched. The daemon calls `pkcheck` for the `com.webauthnproxy.authenticate` action, which triggers the desktop authentication agent to prompt the user with their system password or fingerprint. The daemon allows up to 3 attempts per session; if all fail a cooldown is imposed (1 min → 5 min → 15 min → 30 min → 1 h → 2 h → 5 h per consecutive failed session). A successful authentication resets the counter.
 
-### TPM2 (Key Protection) — Current State
+### TPM2 (Key Protection)
 
-Software fallback is active. Private keys are stored as hex files in `/etc/webauthn-proxy/keys/` owned by the daemon user, permissions `0600`. Warning logs are emitted on every operation. This is explicitly not production-safe.
-
-### TPM2 (Key Protection) — Planned Full Implementation
+Keys are sealed to the TPM2 chip using PCR 0+7 policy binding. Build with `--features tpm2`.
 
 ```
-Key generation:  TPM2_Create under the Storage Root Key
+Key generation:  TPM2_Create under the Owner SRK (RSA-2048 restricted decryption key)
 Seal policy:     PCR 0  — firmware measurement
                  PCR 7  — Secure Boot state
-                 PCR 11 — bootloader measurement
 Key material:    never leaves the TPM boundary
-Unseal failure:  any changed PCR value causes automatic key lockout
+Unseal failure:  any changed PCR value causes hard failure (boot-time tampering detected)
 Feature flag:    cargo build --features tpm2
-                 (requires libtss2-esapi system headers)
 ```
 
 ## Registration Flow
@@ -158,10 +154,10 @@ Daemon receives Register() D-Bus call
     │  decrypts envelope
     │  checks replay cache (sequence number + timestamp)
     │  verifies HMAC
-    │  calls PAM → user enters PIN / fingerprint / password on /dev/tty
-    │  PAM approved
+    │  calls polkit → desktop auth agent prompts user
+    │  polkit approved
     │  generates P-256 keypair
-    │  seals private key via TPM2 (software fallback currently active)
+    │  seals private key via TPM2 (PCR 0+7 policy binding)
     │  builds authenticatorData (AAGUID=zeros, AT flag set)
     │  encodes attestation object (format: none)
     │  encrypts response with session token
@@ -193,7 +189,7 @@ Daemon receives Authenticate() D-Bus call
     │  decrypts envelope
     │  checks replay cache
     │  verifies HMAC
-    │  calls PAM → user presence confirmed
+    │  calls polkit → user presence confirmed
     │  resolves credential from allowCredentials or rpId scan
     │  unseals private key from TPM2
     │  verifies rpIdHash matches stored credential
@@ -251,7 +247,8 @@ key encryption layer — the bus boundary itself provides the isolation.
 | Browser ↔ Extension | Chrome sandbox | Extension ID locked in NM manifest | Chrome internal |
 | Extension ↔ Native Host | Chrome Native Messaging stdin/stdout | `allowed_origins` in host manifest | None (process isolation) |
 | Native Host ↔ Daemon | D-Bus system bus | Kernel policy + process ancestry + session HMAC | AES-256-GCM |
-| Daemon ↔ Hardware | Kernel syscalls | PAM stack + TPM2 PCR policy | TPM2 hardware boundary |
+| Daemon ↔ Hardware | Kernel syscalls | Polkit + TPM2 PCR policy | TPM2 hardware boundary |
+| GUI Manager ↔ Daemon | D-Bus system bus | Kernel policy + polkit for destructive ops | None (metadata only; key material not exposed) |
 
 ## Planned: Daemon Broadcaster Pattern
 
@@ -301,6 +298,17 @@ Implementations:
 - `LocalBackend` — PAM + TPM2 (current)
 - `MobileBackend` — phone bridge (planned)
 - `HybridBackend` — try local first, fall back to mobile (planned)
+
+## Planned: GTK4 Credential Manager
+
+A separate native binary (`webauthn-proxy-manager`) providing a graphical interface:
+
+- **Credentials tab**: lists all registered credentials with key name, date/time created, origin type (website or extension), application name (parsed from rpId), and user-configurable nickname. Supports deletion with polkit re-authentication.
+- **Secure Folders tab**: create and manage TPM-encrypted AES-256-GCM folders. All-or-nothing access — unlock the folder, add files, lock it. All contents encrypted on lock. Listed in credential manager.
+- **Biometrics tab**: manage Howdy (face recognition) and fprintd (fingerprint) enrollments. Shows type, date, time, scan name, and user nickname. Enrollment delegates to system tools.
+- **Mobile Pairing tab**: placeholder — planned feature.
+
+The manager communicates with the daemon exclusively via D-Bus. The daemon will expose read-only credential listing methods accessible to local users, and destructive operations (delete, rename) will require polkit re-authentication. Key material never crosses the D-Bus boundary — only metadata is exposed.
 
 ## File Structure
 
@@ -364,7 +372,7 @@ webauthn-proxy/
 |---|---|
 | `/etc/webauthn-proxy/trusted-binaries.json` | SHA-256 hashes of installed binaries, verified at daemon startup |
 | `/etc/webauthn-proxy/credentials/` | Credential metadata JSON files — no key material |
-| `/etc/webauthn-proxy/keys/` | Software fallback key storage — replaced by TPM2 in production |
+| `/etc/webauthn-proxy/keys/` | TPM2 sealed key blobs (JSON: TPM2B_PUBLIC + TPM2B_PRIVATE, hex-encoded) |
 | `/etc/pam.d/webauthn-proxy` | PAM service configuration for user presence verification |
 | `/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf` | D-Bus system bus policy — restricts who can own and call the daemon service |
 | `scripts/com.webauthnproxy.host.json` | Chrome Native Messaging host manifest — declares binary path and allowed extension IDs |

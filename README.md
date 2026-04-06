@@ -31,7 +31,7 @@ When a website or browser extension asks for secure authentication, the proxy in
 
 This project was built by a cybersecurity student as a learning exercise in platform security and authentication. It was born out of a personal need — Linux had no working solution for a problem I ran into daily, so I built one.
 
-This project is in early development. The code has not been audited. There are known unfinished components — TPM2 hardware key sealing with PCR boot-state binding is currently using a software fallback.
+This project is in early development. The code has not been audited.
 
 Installation and daily use is not recommended at this stage. If you choose to install and use this software, you do so entirely at your own risk.
 
@@ -62,15 +62,27 @@ If you find a security issue please open a GitHub issue or contact me directly b
 - System tray indicator showing proxy is running
 - Full 8-point health check on every install
 - Uninstall script
+- Real TPM2 hardware key sealing with PCR 0+7 policy binding
+- Polkit desktop authentication agent integration
+- Authentication retry/cooldown brute-force protection (3 attempts, exponential cooldown: 1m/5m/15m/30m/1h/2h/5h)
+- Verified NordPass compatibility (v7.5.7)
+- rpIdHash fix for Chrome extension origin (chrome-extension:// prefix)
 
 ### In Progress
-- TPM2 hardware key sealing with PCR boot-state binding — software fallback is active in the meantime
+- Fingerprint authentication via fprintd and face recognition via Howdy as polkit factor
+- Hard enforcement of Secure Boot requirement at daemon startup
 
 ### Planned — Linux Platform
-- Credential management UI
-- Full TPM2 integration with PCR 0, 7, and 11 binding
-- Fingerprint authentication via fprintd
-- Face recognition via Howdy
+- GTK4 Credential Manager (separate binary: `webauthn-proxy-manager`)
+  - Credential list: key name, date/time created, origin type (website/extension), application (parsed from rpId), user-configurable nickname
+  - Credential deletion (requires polkit re-authentication)
+  - Secure Folder: TPM-encrypted AES-256-GCM folder, all-or-nothing access, password-locked, listed in credential manager
+  - File/folder encryption tool (future)
+- Biometric Manager (inside GTK4 GUI)
+  - Manage Howdy (face recognition) and fprintd (fingerprint) enrollments
+  - List: type, date, time, scan name, user nickname
+  - Enrollment via system tools (full in-app enrollment on roadmap)
+- Mobile Pairing (UI placeholder in GTK4 GUI — planned feature)
 
 ### Planned — Mobile Bridge
 
@@ -85,13 +97,15 @@ Pair your phone with your Linux machine. When a site requests authentication you
 ## Logs and Troubleshooting
 
 - Daemon logs: `journalctl -u webauthn-proxy-daemon -f`
-- Native host logs: `tail -f /tmp/webauthn-proxy-host.log`
+- Native host logs: `/tmp/webauthn-proxy-host.log`
 - Extension logs: Chrome DevTools on the background service worker at `chrome://extensions/`
 - Tray logs: `journalctl --user -u webauthn-proxy-tray -f`
 
 ## Testing
 
 Open [https://webauthn.io](https://webauthn.io), enter a username, click Register, and follow the prompts. You should be asked for your Linux password or PIN. Complete registration then test Sign In to confirm the full flow works.
+
+NordPass compatibility: Toggle biometric unlock in NordPass settings. The polkit authentication dialog will appear. Enter your Linux password. NordPass biometrics will activate successfully. Verified working with NordPass v7.5.7.
 
 ## License
 

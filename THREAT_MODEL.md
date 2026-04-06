@@ -75,8 +75,6 @@ TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
 - The daemon runs as a dedicated system user (`webauthn-proxy`) — a user-space attacker running as a different user cannot read daemon memory.
 - The session token is transmitted over the kernel-mediated D-Bus system bus. The bus enforces the policy file before delivering the `Connect` response — the token is never present on a channel accessible to unprivileged user processes. The former bootstrap key encryption layer has been eliminated as an attack surface; D-Bus system bus isolation provides equivalent protection with a simpler trust model.
 
-**Planned:**
-- The daemon systemd unit includes `ProtectMemory=yes`, `MemoryDenyWriteExecute=yes`, and `NoNewPrivileges=yes` to further restrict memory access at the OS level.
 
 ### 6. Binary Substitution
 
@@ -97,7 +95,7 @@ TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
 
 **Mitigations:**
 - **Secure Boot (required):** Rejects unsigned bootloaders and kernels — the live USB attack fails at boot before any modifications can take effect.
-- **TPM2 PCR binding (planned full implementation):** Keys are sealed to PCR 0 (firmware measurement), PCR 7 (Secure Boot state), and PCR 11 (bootloader). Any modification changes the PCR values and the keys will not unseal.
+- **TPM2 PCR binding (implemented):** Keys are sealed to PCR 0 (firmware measurement) and PCR 7 (Secure Boot state). Any modification changes the PCR values and the keys will not unseal.
 - If Secure Boot is disabled since the last run, the daemon detects the state change and refuses to unseal keys pending re-enrollment.
 
 ### 8. PAM Stack Tampering
@@ -115,8 +113,7 @@ TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
 
 **Mitigations:**
 - TPM2 keys are physically bound to the TPM chip on this machine — they cannot be exported or used on any other hardware.
-- Software fallback keys (current state) are not hardware-bound — this is the known gap the full TPM2 implementation closes. See [Current Known Gaps](#current-known-gaps).
-- Warning-level log entries are emitted every time the software fallback is active so the gap is never silent.
+- All credential keys are sealed to the TPM chip using PCR 0+7 policy binding. Keys cannot be transferred to another machine.
 
 ### 10. Unauthorized Mobile Forwarding (Planned Feature)
 
@@ -141,6 +138,17 @@ If an attacker has kernel ring-0 access, all software security guarantees on the
 
 If a user is physically forced to authenticate, no software solution can prevent it. Out of scope.
 
+### 11. Authentication Brute Force
+
+**Threat:** Attacker with physical or remote access attempts to guess the user's password by repeatedly triggering WebAuthn authentication requests.
+
+**Mitigations implemented:**
+- Maximum 3 authentication attempts per session via polkit.
+- After a failed session (all 3 attempts fail), a cooldown is imposed before the next attempt is permitted.
+- Cooldown schedule (per failed session count): 1 min → 5 min → 15 min → 30 min → 1 hour → 2 hours → 5 hours.
+- Cooldown state is maintained in daemon memory — resets on daemon restart (intentional: daemon restart requires root access which is a higher privilege than the attack assumes).
+- A successful authentication resets the failed session counter to zero.
+
 ## What This Project Does Not Protect Against
 
 - Remote attackers — no network surface is exposed by this project
@@ -153,7 +161,6 @@ If a user is physically forced to authenticate, no software solution can prevent
 
 These are honest gaps in the current implementation, not omissions from the design:
 
-- **TPM2 PCR key sealing is stubbed.** The software fallback stores keys as hex files on disk. They are protected by filesystem permissions (mode 0600, daemon user only) but are not hardware-bound. A root attacker can read them. This gap is closed when the full TPM2 implementation lands.
 - **MOK binary signing is not yet implemented.** Binary substitution protection is detection-only at runtime via hash verification. It is not boot-time prevention. Until MOK signing is in place, a root attacker who modifies a binary before the daemon starts will not be caught until startup.
 - **Secure Boot enforcement is currently a warning, not a hard exit.** The daemon checks the Secure Boot EFI variable at startup and logs a warning if it is disabled, but continues running. Hard enforcement will be enabled alongside MOK signing so the binaries can pass the check they require.
 - **The mobile bridge does not exist yet.** The threat model for it in this document is speculative design intent. It will be updated when the feature is implemented.
