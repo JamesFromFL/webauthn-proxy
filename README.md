@@ -51,9 +51,7 @@ If you find a security issue please open a GitHub issue or contact me directly b
 - ✅ Polkit desktop authentication with brute-force cooldown protection
 - ✅ Process ancestry verification and binary integrity checks
 - ✅ Hardened systemd service, guided installer, and uninstall script
-
-### In Progress
-- ⏳ Hard Secure Boot enforcement at daemon startup
+- ✅ Hard Secure Boot enforcement at daemon startup
 
 ### To Do
 - 🔵 Fingerprint (fprintd) and face recognition (Howdy) as polkit factors
