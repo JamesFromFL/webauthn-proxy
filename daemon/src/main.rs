@@ -3,7 +3,7 @@
 // Startup order:
 //   1. Initialise file logger (never stdout/stderr in production)
 //   2. Enforce prerequisites (Secure Boot, TPM2, binary integrity)
-//   3. Build shared daemon state (session store, replay cache, bootstrap key)
+//   3. Build shared daemon state (session store, replay cache)
 //   4. Register D-Bus service "com.webauthnproxy.Daemon" on the system bus
 //   5. Run the tokio event loop indefinitely
 

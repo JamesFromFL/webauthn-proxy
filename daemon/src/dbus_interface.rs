@@ -4,7 +4,7 @@
 // Object path:     /com/webauthnproxy/Daemon
 //
 // Methods:
-//   Connect(pid)                      → encrypted session token (JSON)
+//   Connect(pid)                      → session token bytes (Vec<u8>)
 //   Register(pid, encrypted_request)  → encrypted response (JSON)
 //   Authenticate(pid, encrypted_request) → encrypted response (JSON)
 //   Disconnect(pid)                   → ()
@@ -16,14 +16,13 @@
 
 use std::sync::Arc;
 use log::{debug, info, warn};
-use zeroize::Zeroizing;
 
 use crate::authentication;
 use crate::crypto;
 use crate::protocol::{CreateRequest, GetRequest};
 use crate::registration;
 use crate::replay::AsyncReplayCache;
-use crate::session::{load_bootstrap_key, SessionStore};
+use crate::session::SessionStore;
 use crate::validator;
 
 // ---------------------------------------------------------------------------
@@ -32,17 +31,15 @@ use crate::validator;
 
 /// State shared by the D-Bus interface across all D-Bus method calls.
 pub struct DaemonState {
-    pub sessions:       SessionStore,
-    pub replay_cache:   AsyncReplayCache,
-    pub bootstrap_key:  Zeroizing<[u8; 32]>,
+    pub sessions:     SessionStore,
+    pub replay_cache: AsyncReplayCache,
 }
 
 impl DaemonState {
     pub fn new() -> Self {
         DaemonState {
-            sessions:      SessionStore::new(),
-            replay_cache:  AsyncReplayCache::new(),
-            bootstrap_key: load_bootstrap_key(),
+            sessions:     SessionStore::new(),
+            replay_cache: AsyncReplayCache::new(),
         }
     }
 }
@@ -76,8 +73,11 @@ impl DaemonInterface {
     /// Called by the native host on startup.
     ///
     /// Validates that `pid` belongs to a Chrome/Chromium process, then issues a
-    /// fresh session token and returns it AES-GCM encrypted with the bootstrap key.
-    async fn connect(&self, pid: u32) -> Result<String, zbus::fdo::Error> {
+    /// fresh session token and returns the raw 32-byte token over the kernel-
+    /// mediated D-Bus system bus.  The system bus guarantees that only
+    /// authorised processes (policy file) can reach this method, so no
+    /// additional bootstrap-key encryption layer is required.
+    async fn connect(&self, pid: u32) -> Result<Vec<u8>, zbus::fdo::Error> {
         info!("[dbus] Connect called from pid={pid}");
 
         if !validator::verify_caller_process(pid) {
@@ -89,11 +89,8 @@ impl DaemonInterface {
 
         let token_bytes = self.state.sessions.issue_token(pid).await;
 
-        let wrapped = crypto::wrap_session_token(&self.state.bootstrap_key, &token_bytes)
-            .map_err(|e| zbus::fdo::Error::Failed(e))?;
-
         info!("[dbus] Connect successful for pid={pid}");
-        Ok(wrapped)
+        Ok(token_bytes.to_vec())
     }
 
     // ── Register ─────────────────────────────────────────────────────────────

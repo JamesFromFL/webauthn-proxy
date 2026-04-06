@@ -13,80 +13,132 @@ type HmacSha256 = Hmac<Sha256>;
 // Caller process verification
 // ---------------------------------------------------------------------------
 
-/// Verify that `pid` is a Chrome or Chromium process whose parent is also a
-/// Chrome/Chromium process.
+/// Verify that `pid` is a supported browser process with a browser ancestor.
 ///
-/// Checks performed (in order):
-///   1. /proc/{pid}/exe  resolves to a chrome/chromium binary path
-///   2. /proc/{pid}/status PPid line — parent also resolves to chrome/chromium
-///   3. /proc/{pid}/cmdline contains "chrome" or "chromium"
+/// The daemon runs as a different system user than the browser, so
+/// `/proc/{pid}/exe` may be unreadable (EPERM). The strategy is:
+///
+///   1. Try `/proc/{pid}/exe` — if readable, validate it; if EPERM, defer to
+///      cmdline; any other error is a hard fail.
+///   2. `/proc/{pid}/cmdline` — always readable across user boundaries on
+///      Linux; must contain a recognised browser identifier.
+///   3. Parent ancestry via cmdline — parent or grandparent cmdline must also
+///      contain a browser identifier (exe symlinks are attempted first if
+///      readable, then cmdline as fallback).
 ///
 /// Returns false on any failure; never panics.
 pub fn verify_caller_process(pid: u32) -> bool {
-    // ── Check 1: binary path ────────────────────────────────────────────
-    let exe_path = match std::fs::read_link(format!("/proc/{pid}/exe")) {
-        Ok(p) => p,
+    // ── Check 1: binary path (EPERM is non-fatal; falls through to cmdline) ──
+    let exe_ok = match std::fs::read_link(format!("/proc/{pid}/exe")) {
+        Ok(exe) => {
+            let s = exe.to_string_lossy();
+            if is_valid_browser_exe(&s) {
+                debug!("[validator] pid={pid} exe={s} — recognised browser");
+                true
+            } else {
+                warn!("[validator] pid={pid} exe={s} — not a recognised browser");
+                false
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            // Daemon runs as a different user — exe unreadable, fall through to cmdline
+            debug!("[validator] pid={pid} exe unreadable (permission denied) — deferring to cmdline");
+            true
+        }
         Err(e) => {
-            warn!("[validator] Cannot read /proc/{pid}/exe: {e}");
-            return false;
+            warn!("[validator] pid={pid} cannot read exe: {e}");
+            false
         }
     };
-    let exe_str = exe_path.to_string_lossy();
-    if !is_chrome_binary(&exe_str) {
-        warn!("[validator] pid={pid} exe={exe_str} is not a chrome/chromium binary");
+    if !exe_ok {
         return false;
     }
 
-    // ── Check 2: parent process ─────────────────────────────────────────
-    let ppid = match read_ppid(pid) {
-        Some(p) => p,
-        None => {
-            warn!("[validator] Cannot determine PPid for pid={pid}");
-            return false;
-        }
-    };
-    let parent_exe = match std::fs::read_link(format!("/proc/{ppid}/exe")) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("[validator] Cannot read /proc/{ppid}/exe (parent of pid={pid}): {e}");
-            return false;
-        }
-    };
-    let parent_str = parent_exe.to_string_lossy();
-    if !is_chrome_binary(&parent_str) {
-        warn!(
-            "[validator] pid={pid} parent pid={ppid} exe={parent_str} is not chrome/chromium"
-        );
-        return false;
-    }
-
-    // ── Check 3: cmdline sanity check ───────────────────────────────────
+    // ── Check 2: cmdline (readable across user boundaries) ───────────────
     match std::fs::read(format!("/proc/{pid}/cmdline")) {
         Ok(cmdline) => {
-            let cmdline_str = String::from_utf8_lossy(&cmdline);
-            // cmdline is null-separated; argv[0] is the binary name
-            if !cmdline_str.contains("chrome") && !cmdline_str.contains("chromium") {
-                warn!("[validator] pid={pid} cmdline does not contain chrome/chromium");
+            let s = String::from_utf8_lossy(&cmdline);
+            if is_valid_browser_exe(&s) {
+                debug!("[validator] pid={pid} cmdline contains browser identifier");
+            } else {
+                warn!(
+                    "[validator] pid={pid} cmdline does not contain browser identifier: {}",
+                    &s[..s.len().min(200)]
+                );
                 return false;
             }
         }
         Err(e) => {
-            warn!("[validator] Cannot read /proc/{pid}/cmdline: {e}");
+            warn!("[validator] pid={pid} cannot read cmdline: {e}");
             return false;
         }
     }
 
-    debug!("[validator] pid={pid} passed all process verification checks");
-    true
+    // ── Check 3: parent/grandparent ancestry ─────────────────────────────
+    if let Some(ppid) = read_ppid(pid) {
+        // Try parent exe first; fall back to parent cmdline on EPERM
+        let parent_browser = match std::fs::read_link(format!("/proc/{ppid}/exe")) {
+            Ok(p) => is_valid_browser_exe(&p.to_string_lossy()),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                // Fall through to cmdline check below
+                false
+            }
+            Err(_) => false,
+        };
+
+        if parent_browser {
+            debug!("[validator] pid={pid} parent ppid={ppid} exe — recognised browser");
+            return true;
+        }
+
+        // Parent cmdline (always readable)
+        if let Ok(cmdline) = std::fs::read(format!("/proc/{ppid}/cmdline")) {
+            if is_valid_browser_exe(&String::from_utf8_lossy(&cmdline)) {
+                debug!("[validator] pid={pid} parent ppid={ppid} cmdline — recognised browser");
+                return true;
+            }
+        }
+
+        // Grandparent check
+        if let Some(gppid) = read_ppid(ppid) {
+            let gp_browser = match std::fs::read_link(format!("/proc/{gppid}/exe")) {
+                Ok(p) => is_valid_browser_exe(&p.to_string_lossy()),
+                Err(_) => false,
+            };
+            if gp_browser {
+                debug!("[validator] pid={pid} grandparent ppid={gppid} exe — recognised browser");
+                return true;
+            }
+            if let Ok(cmdline) = std::fs::read(format!("/proc/{gppid}/cmdline")) {
+                if is_valid_browser_exe(&String::from_utf8_lossy(&cmdline)) {
+                    debug!(
+                        "[validator] pid={pid} grandparent ppid={gppid} cmdline — recognised browser"
+                    );
+                    return true;
+                }
+            }
+        }
+
+        warn!("[validator] pid={pid} no recognised browser found in parent/grandparent chain");
+        false
+    } else {
+        warn!("[validator] pid={pid} cannot determine parent pid");
+        false
+    }
 }
 
-/// Return true if the given path looks like a Chrome or Chromium binary.
-fn is_chrome_binary(path: &str) -> bool {
+/// Return true if the path/name belongs to a supported browser binary.
+///
+/// Accepts Chromium, Chrome, Brave, Microsoft Edge, and Vivaldi — matched
+/// case-insensitively so distro-repackaged names (e.g. `chromium-browser`) are
+/// also covered.
+fn is_valid_browser_exe(path: &str) -> bool {
     let lower = path.to_lowercase();
-    lower.contains("google-chrome")
-        || lower.contains("chromium")
-        || lower.contains("chrome-sandbox")
-        || lower.contains("/chrome")
+    lower.contains("chromium")
+        || lower.contains("chrome")
+        || lower.contains("brave")
+        || lower.contains("microsoft-edge")
+        || lower.contains("vivaldi")
 }
 
 /// Parse the PPid field from /proc/{pid}/status.
