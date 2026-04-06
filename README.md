@@ -65,7 +65,6 @@ If you find a security issue please open a GitHub issue or contact me directly b
 - Real TPM2 hardware key sealing with PCR 0+7 policy binding
 - Polkit desktop authentication agent integration
 - Authentication retry/cooldown brute-force protection (3 attempts, exponential cooldown: 1m/5m/15m/30m/1h/2h/5h)
-- Verified NordPass compatibility (v7.5.7)
 - rpIdHash fix for Chrome extension origin (chrome-extension:// prefix)
 
 ### In Progress
