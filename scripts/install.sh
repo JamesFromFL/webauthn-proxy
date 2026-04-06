@@ -627,7 +627,7 @@ ok "Build complete: ${HOST_BINARY}"
 echo ""
 info "Building ${DAEMON_BINARY} (release)..."
 cd "${REPO_ROOT}/daemon"
-RUSTFLAGS="-A warnings" "${CARGO}" build --release
+RUSTFLAGS="-A warnings" "${CARGO}" build --features tpm2 --release
 ok "Build complete: ${DAEMON_BINARY}"
 
 # ── 4.4 Install binaries ──────────────────────────────────────────────────
