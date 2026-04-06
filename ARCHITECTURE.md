@@ -14,7 +14,7 @@ Chrome Browser
          └── Extension (background.js)
               └── chrome.runtime.sendNativeMessage
                    └── Native Host (Rust binary)
-                        └── D-Bus session bus (AES-256-GCM + HMAC)
+                        └── D-Bus system bus (AES-256-GCM + HMAC)
                              └── Daemon (persistent Rust service)
                                   ├── PAM (user presence verification)
                                   ├── TPM2 (key sealing + signing)
@@ -25,7 +25,7 @@ Chrome Browser
 
 **File:** `extension/src/background.js`
 
-Chrome MV3 service worker. Uses the `webAuthenticationProxy` API to intercept `navigator.credentials.create()` and `navigator.credentials.get()` calls before the browser can reject them for lacking a platform authenticator. Builds `clientDataJSON`, extracts `rpId` and challenge, and forwards to the native host via `chrome.runtime.sendNativeMessage`. On response calls `completeCreateRequest` or `completeGetRequest`. On failure or 10-second timeout calls `cancelRequest` with a descriptive error. All events logged with `[WebAuthn Proxy]` prefix.
+Chrome MV3 service worker. Uses the `webAuthenticationProxy` API to intercept `navigator.credentials.create()` and `navigator.credentials.get()` calls before the browser can reject them for lacking a platform authenticator. Calls `chrome.webAuthenticationProxy.attach()` on startup to register as the active proxy. Builds `clientDataJSON`, extracts `rpId` and challenge, and forwards to the native host via `chrome.runtime.sendNativeMessage`. On success calls `completeCreateRequest` or `completeGetRequest`. On failure or 10-second timeout calls the same completion function with an error object. All events logged with `[WebAuthn Proxy]` prefix.
 
 Supporting files:
 - `crypto.js` — base64url encode/decode, rpIdHash computation, clientDataJSON builder
@@ -38,7 +38,7 @@ Supporting files:
 
 Rust binary. Chrome spawns it on demand when the extension calls `sendNativeMessage`. Communicates with Chrome over stdin/stdout using the Native Messaging protocol — every message prefixed with a 4-byte little-endian length field. Stdout is exclusively the Chrome message channel — all logging goes to `/tmp/webauthn-proxy-host.log`.
 
-On startup connects to the daemon over D-Bus and establishes a session. All subsequent requests are serialized, wrapped in a signed and encrypted envelope, and forwarded to the daemon. Responses are decrypted and returned to Chrome.
+On startup connects to the daemon over the D-Bus system bus and establishes a session. The session token is received as raw bytes — no bootstrap key decryption needed, as the system bus itself is kernel-mediated and policy-controlled. All subsequent requests are serialized, wrapped in a signed and encrypted envelope, and forwarded to the daemon. Responses are decrypted and returned to Chrome.
 
 Modules:
 - `main.rs` — message framing loop, dispatch
@@ -53,7 +53,7 @@ Modules:
 
 ## Layer 3 — IPC Channel
 
-**Transport:** D-Bus session bus
+**Transport:** D-Bus system bus
 
 Every message between native host and daemon is:
 1. Serialized to JSON
@@ -61,7 +61,7 @@ Every message between native host and daemon is:
 3. HMAC-SHA256 signed with the session token
 4. AES-256-GCM encrypted with the session token
 
-The session token was issued by the daemon after process verification and transmitted encrypted with the bootstrap key.
+The session token is issued by the daemon after process verification and returned as raw bytes over the D-Bus system bus. The system bus is mediated by the kernel and enforced by a D-Bus policy file — only authorised users and processes can reach `com.webauthnproxy.Daemon`, replacing the former bootstrap key encryption layer.
 
 Wire format (outer envelope, JSON):
 ```
@@ -87,7 +87,7 @@ Replay protection: the daemon rejects any sequence number already seen and any t
 
 **Files:** `daemon/src/`
 
-Persistent Rust service registered on the D-Bus session bus as `com.webauthnproxy.Daemon` at `/com/webauthnproxy/Daemon`. Runs as a dedicated system user (`webauthn-proxy`) under a hardened systemd unit.
+Persistent Rust service registered on the D-Bus system bus as `com.webauthnproxy.Daemon` at `/com/webauthnproxy/Daemon`. Runs as a dedicated system user (`webauthn-proxy`) under a hardened systemd unit.
 
 Startup sequence:
 ```
@@ -97,24 +97,23 @@ Startup sequence:
      ├── TPM2 device presence check (/dev/tpm0, /dev/tpmrm0)
      ├── TPM2 responsiveness check (TPM2_GetCapability command)
      └── Binary SHA-256 hash verification against trusted-binaries.json
-3. Load bootstrap key from /etc/webauthn-proxy/bootstrap.key
-4. Register D-Bus service name and object
-5. Enter tokio async event loop
+3. Register D-Bus service name and object
+4. Enter tokio async event loop
 ```
 
 D-Bus interface — `com.webauthnproxy.Daemon`:
-- `Connect(pid)` — verify caller process ancestry, issue session token, return encrypted
+- `Connect(pid)` — verify caller process ancestry, issue session token, return raw token bytes
 - `Register(pid, encrypted_request)` — decrypt, replay check, HMAC verify, dispatch to registration handler, return encrypted response
 - `Authenticate(pid, encrypted_request)` — same flow, dispatch to authentication handler
 - `Disconnect(pid)` — revoke session token, zeroize
 
 Modules:
 - `prereqs.rs` — Secure Boot EFI var check, TPM2 device check, TPM2 command probe, binary SHA-256 verification
-- `session.rs` — session token issuance, mlocked memory, zeroize on drop, bootstrap key loading
+- `session.rs` — session token issuance, mlocked memory, zeroize on drop
 - `validator.rs` — `/proc` ancestry verification, binary integrity check, HMAC verification
 - `replay.rs` — sequence number cache, timestamp window enforcement, async mutex
-- `crypto.rs` — AES-256-GCM encrypt/decrypt, HMAC-SHA256, session token wrapping/unwrapping
-- `dbus_interface.rs` — zbus interface definition, `DaemonState` (SessionStore + ReplayCache + bootstrap key)
+- `crypto.rs` — AES-256-GCM encrypt/decrypt, HMAC-SHA256
+- `dbus_interface.rs` — zbus interface definition, `DaemonState` (SessionStore + ReplayCache)
 - `pam.rs` — async PAM via `spawn_blocking`, `/dev/tty` conversation handler, echo-off PIN input
 - `tpm.rs` — software fallback with loud warnings, `#[cfg(feature = "tpm2")]` stubs for PCR sealing
 
@@ -218,20 +217,19 @@ Browser submits assertion to server — authentication complete
 
 ```
 Native Host starts
-    │  connects to D-Bus session bus
+    │  connects to D-Bus system bus
     │  calls Connect(pid)
     ▼
 Daemon verifies caller
-    │  reads /proc/{pid}/exe       — must be Chrome/Chromium binary
-    │  reads /proc/{pid}/status    — PPid must also be Chrome/Chromium
-    │  reads /proc/{pid}/cmdline   — confirmed Chrome invocation
+    │  reads /proc/{pid}/exe       — must be a recognised browser binary
+    │                                (EPERM falls through to cmdline check)
+    │  reads /proc/{pid}/cmdline   — confirmed browser invocation
+    │  checks parent/grandparent cmdline — browser ancestry confirmed
     │  generates 32-byte CSPRNG session token
     │  mlocks token page in memory
-    │  encrypts token with bootstrap key (AES-256-GCM)
-    │  returns encrypted token
+    │  returns raw token bytes over kernel-mediated D-Bus system bus
     ▼
-Native Host decrypts token using bootstrap key
-    │  stores token in memory for session duration
+Native Host stores raw token in memory for session duration
     ▼
 All subsequent requests encrypted + HMAC signed with session token
     ▼
@@ -240,13 +238,19 @@ Native Host exits
          └── daemon zeroizes session token, removes from store
 ```
 
+The D-Bus system bus is mediated by the kernel via a policy file
+(`/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf`). Only the
+`webauthn-proxy` system user can own the service name, and only processes
+matching the policy can call `Connect`. This replaces the former bootstrap
+key encryption layer — the bus boundary itself provides the isolation.
+
 ### Trust Boundary Summary
 
 | Boundary | Transport | Authentication | Encryption |
 |---|---|---|---|
 | Browser ↔ Extension | Chrome sandbox | Extension ID locked in NM manifest | Chrome internal |
 | Extension ↔ Native Host | Chrome Native Messaging stdin/stdout | `allowed_origins` in host manifest | None (process isolation) |
-| Native Host ↔ Daemon | D-Bus session bus | Process ancestry + session HMAC | AES-256-GCM |
+| Native Host ↔ Daemon | D-Bus system bus | Kernel policy + process ancestry + session HMAC | AES-256-GCM |
 | Daemon ↔ Hardware | Kernel syscalls | PAM stack + TPM2 PCR policy | TPM2 hardware boundary |
 
 ## Planned: Daemon Broadcaster Pattern
@@ -359,9 +363,9 @@ webauthn-proxy/
 | Path | Purpose |
 |---|---|
 | `/etc/webauthn-proxy/trusted-binaries.json` | SHA-256 hashes of installed binaries, verified at daemon startup |
-| `/etc/webauthn-proxy/bootstrap.key` | 32-byte hex key used to encrypt session tokens at issuance |
 | `/etc/webauthn-proxy/credentials/` | Credential metadata JSON files — no key material |
 | `/etc/webauthn-proxy/keys/` | Software fallback key storage — replaced by TPM2 in production |
 | `/etc/pam.d/webauthn-proxy` | PAM service configuration for user presence verification |
+| `/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf` | D-Bus system bus policy — restricts who can own and call the daemon service |
 | `scripts/com.webauthnproxy.host.json` | Chrome Native Messaging host manifest — declares binary path and allowed extension IDs |
 | `scripts/webauthn-proxy-daemon.service` | systemd service unit — runs as `webauthn-proxy` user with strict sandboxing |

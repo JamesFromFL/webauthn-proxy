@@ -12,7 +12,7 @@ The system has four trust boundaries, each with different guarantees:
 
 2. **Extension ↔ Native Host (Chrome Native Messaging, extension ID locked)** — Chrome launches the native host binary and connects it to the extension over stdin/stdout using a 4-byte length-prefixed JSON protocol. Only extensions whose ID matches the one registered in the installed host manifest can open this channel. Chrome enforces the ID check.
 
-3. **Native Host ↔ Daemon (D-Bus session bus, encrypted + HMAC signed)** — The native host connects to the daemon over the D-Bus session bus. Every message is AES-256-GCM encrypted and HMAC-SHA256 signed using a session token issued only after the caller passes process verification. The D-Bus session bus is user-scoped — processes running as different users cannot reach it.
+3. **Native Host ↔ Daemon (D-Bus system bus, encrypted + HMAC signed)** — The native host connects to the daemon over the D-Bus system bus. Every message is AES-256-GCM encrypted and HMAC-SHA256 signed using a session token issued only after the caller passes process verification. The system bus is kernel-mediated and policy-controlled — only processes authorised by the D-Bus policy file (`/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf`) can reach the daemon service.
 
 4. **Daemon ↔ Hardware (PAM stack, TPM2 chip)** — The daemon calls into the PAM stack for user presence verification and communicates with the TPM2 resource manager for key sealing and signing. The daemon runs as a dedicated system user with no login shell and strict systemd confinement.
 
@@ -38,11 +38,12 @@ TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
 
 ### 2. IPC Eavesdropping — Passive Sniffing
 
-**Threat:** A process running as the same user monitors D-Bus traffic (e.g. via `dbus-monitor`) and reads messages in transit.
+**Threat:** A process monitors D-Bus traffic (e.g. via `dbus-monitor`) and reads messages in transit.
 
 **Mitigations implemented:**
 - All IPC payloads are encrypted with AES-256-GCM keyed on the session token.
-- The session token itself is encrypted with the bootstrap key when transmitted at session establishment.
+- The D-Bus system bus is policy-controlled — unprivileged processes cannot monitor system bus traffic without explicit policy allowances.
+- The session token is transmitted over the kernel-mediated system bus at session establishment; no additional bootstrap key encryption layer is needed or present.
 - An eavesdropper sees only ciphertext they cannot decrypt without the session token.
 
 ### 3. Replay Attack
@@ -72,6 +73,7 @@ TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
 - The memory page is mlocked to prevent the token from being swapped to disk.
 - Token is zeroized on session end via the `Zeroizing` wrapper.
 - The daemon runs as a dedicated system user (`webauthn-proxy`) — a user-space attacker running as a different user cannot read daemon memory.
+- The session token is transmitted over the kernel-mediated D-Bus system bus. The bus enforces the policy file before delivering the `Connect` response — the token is never present on a channel accessible to unprivileged user processes. The former bootstrap key encryption layer has been eliminated as an attack surface; D-Bus system bus isolation provides equivalent protection with a simpler trust model.
 
 **Planned:**
 - The daemon systemd unit includes `ProtectMemory=yes`, `MemoryDenyWriteExecute=yes`, and `NoNewPrivileges=yes` to further restrict memory access at the OS level.
