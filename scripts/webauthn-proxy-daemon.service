@@ -18,6 +18,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectMemory=yes
 MemoryDenyWriteExecute=yes
+ReadWritePaths=/etc/webauthn-proxy
 ReadOnlyPaths=/etc
 ReadWritePaths=/tmp
 PrivateTmp=yes

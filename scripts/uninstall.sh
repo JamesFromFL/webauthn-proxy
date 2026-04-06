@@ -53,8 +53,11 @@ sudo -u "${REAL_USER}" \
 echo "==> Removing D-Bus policy..."
 rm -f /etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf
 
-echo "==> Removing PAM config..."
-rm -f /etc/pam.d/webauthn-proxy
+echo "==> Removing sudoers rule..."
+rm -f /etc/sudoers.d/webauthn-proxy
+
+echo "==> Removing polkit policy..."
+rm -f /usr/share/polkit-1/actions/com.webauthnproxy.authenticate.policy
 
 echo "==> Removing native messaging manifests..."
 rm -f /etc/opt/chrome/native-messaging-hosts/com.webauthnproxy.host.json

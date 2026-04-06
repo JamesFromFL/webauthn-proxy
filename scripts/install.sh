@@ -588,7 +588,7 @@ WEBAUTHN_DIR="/etc/webauthn-proxy"
 CREDENTIAL_DIR="${WEBAUTHN_DIR}/credentials"
 KEY_DIR="${WEBAUTHN_DIR}/keys"
 TRUSTED_HASHES="${WEBAUTHN_DIR}/trusted-binaries.json"
-PAM_SERVICE="/etc/pam.d/webauthn-proxy"
+POLKIT_POLICY="/usr/share/polkit-1/actions/com.webauthnproxy.authenticate.policy"
 SYSTEMD_UNIT="/etc/systemd/system/webauthn-proxy-daemon.service"
 DAEMON_USER="webauthn-proxy"
 CHROME_NMH_DIR="/etc/opt/chrome/native-messaging-hosts"
@@ -605,6 +605,16 @@ else
 fi
 # Add to tss group so the daemon can access TPM2 device nodes
 sudo usermod -aG tss "${DAEMON_USER}" 2>/dev/null || true
+
+# Install sudoers rule so the daemon can run pkcheck as root (polkit
+# cross-identity checks require uid 0)
+echo "==> Installing sudoers rule for polkit check..."
+sudo tee /etc/sudoers.d/webauthn-proxy > /dev/null << 'EOF'
+# Allow webauthn-proxy daemon to run pkcheck as root for user presence verification
+webauthn-proxy ALL=(root) NOPASSWD: /usr/bin/pkcheck
+EOF
+sudo chmod 0440 /etc/sudoers.d/webauthn-proxy
+ok "Sudoers rule installed."
 
 # ── 4.2 Build native host ─────────────────────────────────────────────────
 echo ""
@@ -651,34 +661,19 @@ sudo chmod 0644 "${TRUSTED_HASHES}"
 ok "native-host:  ${HOST_HASH}"
 ok "daemon:       ${DAEMON_HASH}"
 
-# ── 4.8 Install PAM service configuration ────────────────────────────────
-echo ""
-if [[ ! -f "${PAM_SERVICE}" ]]; then
-    info "Installing PAM service config at ${PAM_SERVICE}..."
-    sudo tee "${PAM_SERVICE}" > /dev/null << 'EOF'
-# /etc/pam.d/webauthn-proxy
-# PAM configuration for the WebAuthn Proxy user-presence check.
-# Requires the logged-in user to authenticate before every WebAuthn operation.
-#
-# To use a hardware token (e.g. YubiKey via pam_u2f), replace the line below:
-#   auth  required  pam_u2f.so
-# To use fingerprint (fprintd), replace with:
-#   auth  required  pam_fprintd.so
-
-auth     required  pam_unix.so
-account  required  pam_unix.so
-EOF
-    ok "PAM service installed."
-else
-    ok "PAM service already exists at ${PAM_SERVICE}, skipping."
-fi
-
-# ── 4.9 Install D-Bus system policy ──────────────────────────────────────
+# ── 4.8 Install D-Bus system policy ──────────────────────────────────────
 echo ""
 info "Installing D-Bus system policy..."
 sudo install -m 0644 "${REPO_ROOT}/scripts/com.webauthnproxy.Daemon.conf" \
     "/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf"
 ok "D-Bus policy installed."
+
+# ── 4.9 Install polkit policy ─────────────────────────────────────────────
+echo ""
+info "Installing polkit policy..."
+sudo install -m 0644 "${REPO_ROOT}/scripts/com.webauthnproxy.authenticate.policy" \
+    "${POLKIT_POLICY}"
+ok "Polkit policy installed."
 
 # ── 4.10 Install native messaging host manifests ──────────────────────────
 install_manifest() {
@@ -1062,7 +1057,7 @@ done
 echo "[4/8] Configuration..."
 for f in \
     "${TRUSTED_HASHES}" \
-    "${PAM_SERVICE}" \
+    "${POLKIT_POLICY}" \
     "/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf"
 do
     if sudo test -f "${f}"; then
