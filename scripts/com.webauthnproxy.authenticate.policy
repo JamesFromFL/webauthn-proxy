@@ -10,6 +10,7 @@
     <description>Authenticate with WebAuthn Proxy</description>
     <message>WebAuthn Proxy needs to verify your identity before completing authentication.</message>
     <icon_name>security-high</icon_name>
+    <annotate key="org.freedesktop.policykit.owner">unix-user:webauthn-proxy</annotate>
     <defaults>
       <allow_any>auth_self</allow_any>
       <allow_inactive>auth_self</allow_inactive>

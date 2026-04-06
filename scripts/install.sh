@@ -289,50 +289,18 @@ elif [[ "${SB_STATE}" == "disabled" && "${ALREADY_SIGNED}" -eq 0 ]]; then
                     die "Cannot continue without Secure Boot keys"
                 fi
 
-                # Detect dual boot
-                DUAL_BOOT=0
-                if bootctl list 2>/dev/null | grep -qi "windows"; then
-                    warn "Windows boot entry detected — dual boot system"
-                    DUAL_BOOT=1
-                fi
-
                 echo ""
                 info "Step 2: Enroll keys into firmware"
                 echo ""
-                if [[ "${DUAL_BOOT}" -eq 1 ]]; then
-                    echo "  Windows was detected on this system."
-                    echo "  Enrolling Microsoft keys is recommended for dual boot"
-                    echo "  systems to maintain hardware and driver compatibility."
-                    echo ""
-                    if confirm "Enroll keys WITH Microsoft keys included (recommended for dual boot)?"; then
-                        sudo sbctl enroll-keys --microsoft
-                        ok "Keys enrolled with Microsoft keys"
-                    else
-                        echo ""
-                        warn "Enrolling WITHOUT Microsoft keys on a dual boot system"
-                        warn "may prevent Windows from booting or cause hardware issues."
-                        echo ""
-                        if confirm "Are you sure you want to enroll WITHOUT Microsoft keys?"; then
-                            sudo sbctl enroll-keys
-                            ok "Keys enrolled without Microsoft keys"
-                        else
-                            sudo sbctl enroll-keys --microsoft
-                            ok "Keys enrolled with Microsoft keys"
-                        fi
-                    fi
+                warn "Before enrolling keys, consider: if your hardware requires Microsoft's"
+                warn "UEFI keys (common on dual-boot systems, some laptops, or if you plan to"
+                warn "install Windows), you should include them."
+                echo ""
+                read -rp "Include Microsoft keys? (recommended for most hardware) [Y/n]: " ms_keys
+                if [[ "${ms_keys,,}" != "n" ]]; then
+                    sudo sbctl enroll-keys --microsoft
                 else
-                    echo "  Single boot system detected."
-                    echo "  You can enroll with or without Microsoft keys."
-                    echo "  Microsoft keys are not required for single boot Linux systems"
-                    echo "  but some hardware (graphics cards, network cards) may need them."
-                    echo ""
-                    if confirm "Enroll keys WITH Microsoft keys included?"; then
-                        sudo sbctl enroll-keys --microsoft
-                        ok "Keys enrolled with Microsoft keys"
-                    else
-                        sudo sbctl enroll-keys
-                        ok "Keys enrolled without Microsoft keys"
-                    fi
+                    sudo sbctl enroll-keys
                 fi
 
             else
@@ -939,9 +907,10 @@ else
 
     # Step 1 — Open browser to extensions page
     echo ""
-    info "Step 1: Opening ${SELECTED_BROWSER} to the extensions page..."
-    "${SELECTED_BINARY}" "chrome://extensions/" &>/dev/null &
-    sleep 2
+    info "Opening browser to chrome://extensions — enable Developer Mode"
+    info "then click 'Load unpacked' and select: ${REPO_ROOT}/extension"
+    echo ""
+    "${SELECTED_BINARY}" "chrome://extensions" &
     echo ""
     read -rp "  Press Enter once the browser is open and you can see chrome://extensions/..."
 
