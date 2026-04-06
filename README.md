@@ -1,5 +1,5 @@
-# WebAuthn Proxy
-![WebAuthn Proxy](assets/AuthnProxyLogoStylized.png)
+# MyKey Proxy
+![MyKey Proxy](assets/AuthnProxyLogoStylized.png)
 
 Linux has no built-in way to satisfy modern browser security checks that Windows and Mac handle automatically. This project fills that gap — it lets Chrome on Linux use your system's built-in security hardware to handle authentication requests that would otherwise just fail.
 
@@ -55,7 +55,7 @@ If you find a security issue please open a GitHub issue or contact me directly b
 
 ### To Do
 - 🔵 Fingerprint (fprintd) and face recognition (Howdy) as polkit factors
-- 🔵 GTK4 Credential Manager (`webauthn-proxy-manager`)
+- 🔵 GTK4 Credential Manager (`mykey-proxy-manager`)
   - Credentials: key name, created date/time, type, application, nickname
   - Secure Folder: TPM-encrypted, all-or-nothing, password-locked
   - Biometrics: manage Howdy and fprintd enrollments with nicknames
@@ -71,16 +71,16 @@ If you find a security issue please open a GitHub issue or contact me directly b
 
 ## Installation
 
-1. Clone the repo: `git clone https://github.com/JamesFromFL/webauthn-proxy`
+1. Clone the repo: `git clone https://github.com/JamesFromFL/mykey-proxy`
 2. Run the installer: `sudo ./scripts/install.sh`
 3. Follow the on-screen prompts — the installer handles building, installing, Secure Boot checks, TPM verification, extension loading, and a final health check automatically.
 
 ## Logs and Troubleshooting
 
-- Daemon logs: `journalctl -u webauthn-proxy-daemon -f`
-- Native host logs: `/tmp/webauthn-proxy-host.log`
+- Daemon logs: `journalctl -u mykey-proxy-daemon -f`
+- Native host logs: `/tmp/mykey-proxy-host.log`
 - Extension logs: Chrome DevTools on the background service worker at `chrome://extensions/`
-- Tray logs: `journalctl --user -u webauthn-proxy-tray -f`
+- Tray logs: `journalctl --user -u mykey-proxy-tray -f`
 
 ## Testing
 

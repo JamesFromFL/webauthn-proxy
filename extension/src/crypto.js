@@ -232,6 +232,82 @@ function extractCoseParam(coseBytes, paramKey) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Spec-compliant response builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a completeCreateRequest payload from the native host's create response.
+ *
+ * Extracts authenticatorData and public key from the attestationObject so that
+ * Chrome receives all required fields for registration.
+ *
+ * @param {string} requestId
+ * @param {object} nativeResponse  — response.response from the native host
+ * @returns {{ requestId: string, responseJson: string }}
+ */
+export function buildCreateResponse(requestId, nativeResponse) {
+  const inner = nativeResponse.response || {};
+  const attestationObject = inner.attestationObject;
+  const authData = extractFromAttestationObject(attestationObject);
+  const coseKey = extractPublicKeyFromAuthData(authData);
+  const publicKey = coseToSpkiBase64Url(coseKey);
+
+  return {
+    requestId,
+    responseJson: JSON.stringify({
+      id: nativeResponse.id,
+      rawId: nativeResponse.rawId,
+      type: nativeResponse.type || 'public-key',
+      authenticatorAttachment: nativeResponse.authenticatorAttachment || 'platform',
+      clientExtensionResults: nativeResponse.clientExtensionResults || {},
+      response: {
+        clientDataJSON: inner.clientDataJSON,
+        attestationObject: inner.attestationObject,
+        authenticatorData: authData,
+        publicKey,
+        publicKeyAlgorithm: -7,
+        transports: inner.transports || ['internal'],
+      },
+    }),
+  };
+}
+
+/**
+ * Build a completeGetRequest payload from the native host's get response.
+ *
+ * Omits userHandle from the inner response when null or undefined, as required
+ * by the WebAuthn spec and Chrome's proxy API.
+ *
+ * @param {string} requestId
+ * @param {object} nativeResponse  — response.response from the native host
+ * @returns {{ requestId: string, responseJson: string }}
+ */
+export function buildGetResponse(requestId, nativeResponse) {
+  const inner = nativeResponse.response || {};
+
+  const innerResponse = {
+    clientDataJSON: inner.clientDataJSON,
+    authenticatorData: inner.authenticatorData,
+    signature: inner.signature,
+  };
+  if (inner.userHandle != null) {
+    innerResponse.userHandle = inner.userHandle;
+  }
+
+  return {
+    requestId,
+    responseJson: JSON.stringify({
+      id: nativeResponse.id,
+      rawId: nativeResponse.rawId,
+      type: nativeResponse.type || 'public-key',
+      authenticatorAttachment: nativeResponse.authenticatorAttachment || 'platform',
+      clientExtensionResults: nativeResponse.clientExtensionResults || {},
+      response: innerResponse,
+    }),
+  };
+}
+
 /**
  * Walk a CBOR-encoded attestationObject map and return the authData value
  * as a base64url string.

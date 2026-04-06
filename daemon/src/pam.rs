@@ -3,7 +3,7 @@
 // The daemon runs as a system user with no terminal. Polkit handles
 // authentication dialogs on the user's desktop session correctly.
 //
-// polkit action: com.webauthnproxy.authenticate
+// polkit action: com.mykeyproxy.authenticate
 // This prompts the user with their system password or fingerprint
 // via the desktop's authentication agent.
 //
@@ -72,7 +72,7 @@ pub async fn verify_user_presence(calling_pid: u32) -> Result<bool, String> {
         for attempt in 1u32..=3 {
             let output = Command::new("pkcheck")
                 .args([
-                    "--action-id", "com.webauthnproxy.authenticate",
+                    "--action-id", "com.mykeyproxy.authenticate",
                     "--process", &calling_pid.to_string(),
                     "--allow-user-interaction",
                 ])

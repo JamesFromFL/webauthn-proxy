@@ -1,4 +1,4 @@
-# Threat Model — WebAuthn Proxy
+# Threat Model — MyKey Proxy
 
 ## Scope
 
@@ -12,7 +12,7 @@ The system has four trust boundaries, each with different guarantees:
 
 2. **Extension ↔ Native Host (Chrome Native Messaging, extension ID locked)** — Chrome launches the native host binary and connects it to the extension over stdin/stdout using a 4-byte length-prefixed JSON protocol. Only extensions whose ID matches the one registered in the installed host manifest can open this channel. Chrome enforces the ID check.
 
-3. **Native Host ↔ Daemon (D-Bus system bus, encrypted + HMAC signed)** — The native host connects to the daemon over the D-Bus system bus. Every message is AES-256-GCM encrypted and HMAC-SHA256 signed using a session token issued only after the caller passes process verification. The system bus is kernel-mediated and policy-controlled — only processes authorised by the D-Bus policy file (`/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf`) can reach the daemon service.
+3. **Native Host ↔ Daemon (D-Bus system bus, encrypted + HMAC signed)** — The native host connects to the daemon over the D-Bus system bus. Every message is AES-256-GCM encrypted and HMAC-SHA256 signed using a session token issued only after the caller passes process verification. The system bus is kernel-mediated and policy-controlled — only processes authorised by the D-Bus policy file (`/etc/dbus-1/system.d/com.mykeyproxy.Daemon.conf`) can reach the daemon service.
 
 4. **Daemon ↔ Hardware (PAM stack, TPM2 chip)** — The daemon calls into the PAM stack for user presence verification and communicates with the TPM2 resource manager for key sealing and signing. The daemon runs as a dedicated system user with no login shell and strict systemd confinement.
 
@@ -72,15 +72,15 @@ TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
 - Session token exists in memory only, never written to disk.
 - The memory page is mlocked to prevent the token from being swapped to disk.
 - Token is zeroized on session end via the `Zeroizing` wrapper.
-- The daemon runs as a dedicated system user (`webauthn-proxy`) — a user-space attacker running as a different user cannot read daemon memory.
+- The daemon runs as a dedicated system user (`mykey-proxy`) — a user-space attacker running as a different user cannot read daemon memory.
 - The session token is transmitted over the kernel-mediated D-Bus system bus. The bus enforces the policy file before delivering the `Connect` response — the token is never present on a channel accessible to unprivileged user processes. The former bootstrap key encryption layer has been eliminated as an attack surface; D-Bus system bus isolation provides equivalent protection with a simpler trust model.
 
 ### 6. Binary Substitution
 
-**Threat:** Attacker replaces `/usr/local/bin/webauthn-proxy-host` or the daemon binary with a malicious version.
+**Threat:** Attacker replaces `/usr/local/bin/mykey-proxy-host` or the daemon binary with a malicious version.
 
 **Mitigations implemented:**
-- The install script SHA-256 hashes both binaries and writes them to `/etc/webauthn-proxy/trusted-binaries.json`.
+- The install script SHA-256 hashes both binaries and writes them to `/etc/mykey-proxy/trusted-binaries.json`.
 - The daemon verifies both hashes at startup and refuses to issue session tokens if either hash does not match.
 - Both binaries are installed as root-owned and are not writable by the daemon user.
 

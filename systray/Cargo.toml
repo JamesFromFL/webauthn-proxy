@@ -1,12 +1,12 @@
 [package]
-name = "webauthn-proxy-tray"
+name = "mykey-proxy-tray"
 version = "0.1.0"
 edition = "2021"
-description = "System tray indicator for WebAuthn Proxy"
+description = "System tray indicator for MyKey Proxy"
 license = "MIT"
 
 [[bin]]
-name = "webauthn-proxy-tray"
+name = "mykey-proxy-tray"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,24 +1,24 @@
 [Unit]
-Description=WebAuthn Proxy Daemon
-Documentation=https://github.com/JamesFromFL/webauthn-proxy
+Description=MyKey Proxy Daemon
+Documentation=https://github.com/JamesFromFL/mykey-proxy
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/webauthn-proxy-daemon
+ExecStart=/usr/local/bin/mykey-proxy-daemon
 Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 Restart=on-failure
 RestartSec=5s
 
 # Run as a dedicated unprivileged system user
-User=webauthn-proxy
+User=mykey-proxy
 
 # Systemd hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectMemory=yes
 MemoryDenyWriteExecute=yes
-ReadWritePaths=/etc/webauthn-proxy
+ReadWritePaths=/etc/mykey-proxy
 ReadOnlyPaths=/etc
 ReadWritePaths=/tmp
 PrivateTmp=yes

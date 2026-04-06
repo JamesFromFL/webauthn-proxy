@@ -3,14 +3,14 @@
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <vendor>WebAuthn Proxy</vendor>
-  <vendor_url>https://github.com/JamesFromFL/webauthn-proxy</vendor_url>
+  <vendor>MyKey Proxy</vendor>
+  <vendor_url>https://github.com/JamesFromFL/mykey-proxy</vendor_url>
 
-  <action id="com.webauthnproxy.authenticate">
-    <description>Authenticate with WebAuthn Proxy</description>
-    <message>WebAuthn Proxy needs to verify your identity before completing authentication.</message>
+  <action id="com.mykeyproxy.authenticate">
+    <description>Authenticate with MyKey Proxy</description>
+    <message>MyKey Proxy needs to verify your identity before completing authentication.</message>
     <icon_name>security-high</icon_name>
-    <annotate key="org.freedesktop.policykit.owner">unix-user:webauthn-proxy</annotate>
+    <annotate key="org.freedesktop.policykit.owner">unix-user:mykey-proxy</annotate>
     <defaults>
       <allow_any>auth_self</allow_any>
       <allow_inactive>auth_self</allow_inactive>

@@ -1,0 +1,9 @@
+{
+  "name": "com.mykeyproxy.host",
+  "description": "MyKey Proxy Native Messaging Host",
+  "path": "/usr/local/bin/mykey-proxy-host",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://EXTENSION_ID_PLACEHOLDER/"
+  ]
+}

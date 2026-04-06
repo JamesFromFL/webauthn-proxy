@@ -1,4 +1,4 @@
-// main.rs — WebAuthn Proxy system tray application entry point.
+// main.rs — MyKey Proxy system tray application entry point.
 
 mod tray;
 
@@ -8,7 +8,7 @@ fn setup_logger() {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/webauthn-proxy-tray.log")
+        .open("/tmp/mykey-proxy-tray.log")
         .expect("Failed to open /tmp/webauthn-proxy-tray.log");
 
     env_logger::Builder::new()
@@ -21,7 +21,7 @@ fn setup_logger() {
 fn main() {
     setup_logger();
     info!(
-        "webauthn-proxy-tray started (pid={}, version={})",
+        "mykey-proxy-tray started (pid={}, version={})",
         std::process::id(),
         env!("CARGO_PKG_VERSION")
     );

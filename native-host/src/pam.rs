@@ -5,7 +5,7 @@
 // /dev/tty so that stdin/stdout remain available for the Chrome Native
 // Messaging protocol.
 //
-// PAM service file: /etc/pam.d/webauthn-proxy  (created by scripts/install.sh)
+// PAM service file: /etc/pam.d/mykey-proxy  (created by scripts/install.sh)
 
 use std::ffi::{CStr, CString};
 use std::io::Write;
@@ -55,7 +55,7 @@ impl pam::Conversation for TtyConversation {
 // ---------------------------------------------------------------------------
 
 /// Verify that the logged-in user is physically present by performing a full
-/// PAM authentication against the "webauthn-proxy" service.
+/// PAM authentication against the "mykey-proxy" service.
 ///
 /// Returns `true` on success, `false` if the challenge fails or is cancelled.
 /// Never logs credential content.
@@ -65,7 +65,7 @@ pub fn verify_user_presence() -> bool {
 
     let conv = TtyConversation { username: username.clone() };
 
-    let mut client = match pam::Client::with_conversation("webauthn-proxy", conv) {
+    let mut client = match pam::Client::with_conversation("mykey-proxy", conv) {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to initialise PAM client: {}", e);

@@ -12,7 +12,7 @@ use log::warn;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-const KEY_DIR: &str = "/etc/webauthn-proxy/keys";
+const KEY_DIR: &str = "/etc/mykey-proxy/keys";
 
 // ---------------------------------------------------------------------------
 // Public API — real TPM2 path (--features tpm2)

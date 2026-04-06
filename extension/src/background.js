@@ -3,9 +3,9 @@
 
 import { buildClientDataJSON, buildCreateResponse, buildGetResponse } from './crypto.js';
 
-const NATIVE_HOST = 'com.webauthnproxy.host';
+const NATIVE_HOST = 'com.mykeyproxy.host';
 const REQUEST_TIMEOUT_MS = 30_000;
-const LOG_PREFIX = '[WebAuthn Proxy]';
+const LOG_PREFIX = '[MyKey Proxy]';
 
 function log(...args) {
   console.log(LOG_PREFIX, ...args);

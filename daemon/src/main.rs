@@ -4,7 +4,7 @@
 //   1. Initialise file logger (never stdout/stderr in production)
 //   2. Enforce prerequisites (Secure Boot, TPM2, binary integrity)
 //   3. Build shared daemon state (session store, replay cache)
-//   4. Register D-Bus service "com.webauthnproxy.Daemon" on the system bus
+//   4. Register D-Bus service "com.mykeyproxy.Daemon" on the system bus
 //   5. Run the tokio event loop indefinitely
 
 use std::sync::Arc;
@@ -34,7 +34,7 @@ fn setup_logger() {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/webauthn-proxy-daemon.log")
+        .open("/tmp/mykey-proxy-daemon.log")
         .expect("Failed to open /tmp/webauthn-proxy-daemon.log");
 
     env_logger::Builder::new()
@@ -53,7 +53,7 @@ async fn main() {
     setup_logger();
 
     info!(
-        "webauthn-proxy-daemon starting (pid={}, version={})",
+        "mykey-proxy-daemon starting (pid={}, version={})",
         std::process::id(),
         env!("CARGO_PKG_VERSION")
     );
@@ -72,8 +72,8 @@ async fn main() {
     let interface = DaemonInterface::new(Arc::clone(&state));
 
     let conn = match zbus::connection::Builder::system()
-        .and_then(|b| b.name("com.webauthnproxy.Daemon"))
-        .and_then(|b| b.serve_at("/com/webauthnproxy/Daemon", interface))
+        .and_then(|b| b.name("com.mykeyproxy.Daemon"))
+        .and_then(|b| b.serve_at("/com/mykeyproxy/Daemon", interface))
     {
         Ok(builder) => match builder.build().await {
             Ok(c) => c,

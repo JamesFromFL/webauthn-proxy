@@ -1,12 +1,12 @@
 [package]
-name = "webauthn-proxy-host"
+name = "mykey-proxy-host"
 version = "0.1.0"
 edition = "2021"
-description = "Chrome Native Messaging Host for WebAuthn Proxy — PAM + TPM2 on Linux"
+description = "Chrome Native Messaging Host for MyKey Proxy — PAM + TPM2 on Linux"
 license = "MIT"
 
 [[bin]]
-name = "webauthn-proxy-host"
+name = "mykey-proxy-host"
 path = "src/main.rs"
 
 [dependencies]

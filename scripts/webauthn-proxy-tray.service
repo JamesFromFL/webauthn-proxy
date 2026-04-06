@@ -1,11 +1,11 @@
 [Unit]
-Description=WebAuthn Proxy System Tray
-After=graphical-session.target webauthn-proxy-daemon.service
-Wants=webauthn-proxy-daemon.service
+Description=MyKey Proxy System Tray
+After=graphical-session.target mykey-proxy-daemon.service
+Wants=mykey-proxy-daemon.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/webauthn-proxy-tray
+ExecStart=/usr/local/bin/mykey-proxy-tray
 Restart=on-failure
 RestartSec=3s
 Environment=DISPLAY=:0

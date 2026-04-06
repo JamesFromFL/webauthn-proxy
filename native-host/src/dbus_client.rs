@@ -1,4 +1,4 @@
-// dbus_client.rs — Blocking D-Bus client for com.webauthnproxy.Daemon.
+// dbus_client.rs — Blocking D-Bus client for com.mykeyproxy.Daemon.
 
 use zbus::blocking::{Connection, Proxy};
 
@@ -16,9 +16,9 @@ impl DaemonClient {
     fn proxy(&self) -> Result<Proxy<'_>, String> {
         Proxy::new(
             &self.conn,
-            "com.webauthnproxy.Daemon",
-            "/com/webauthnproxy/Daemon",
-            "com.webauthnproxy.Daemon",
+            "com.mykeyproxy.Daemon",
+            "/com/mykeyproxy/Daemon",
+            "com.mykeyproxy.Daemon",
         )
         .map_err(|e| format!("D-Bus proxy creation failed: {e}"))
     }

@@ -26,7 +26,7 @@ fn setup_logger() {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/webauthn-proxy-host.log")
+        .open("/tmp/mykey-proxy-host.log")
         .expect("Failed to open /tmp/webauthn-proxy-host.log");
 
     env_logger::Builder::new()
@@ -152,7 +152,7 @@ fn wrap_ok<T: serde::Serialize>(request_id: &str, payload: T) -> Vec<u8> {
 fn main() {
     setup_logger();
     info!(
-        "webauthn-proxy-host started (pid={}, version={})",
+        "mykey-proxy-host started (pid={}, version={})",
         std::process::id(),
         env!("CARGO_PKG_VERSION")
     );

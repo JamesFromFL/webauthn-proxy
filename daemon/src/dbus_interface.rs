@@ -1,7 +1,7 @@
 // dbus_interface.rs — zbus D-Bus interface for the WebAuthn Proxy daemon.
 //
-// Interface name:  com.webauthnproxy.Daemon
-// Object path:     /com/webauthnproxy/Daemon
+// Interface name:  com.mykeyproxy.Daemon
+// Object path:     /com/mykeyproxy/Daemon
 //
 // Methods:
 //   Connect(pid)                      → session token bytes (Vec<u8>)
@@ -48,7 +48,7 @@ impl DaemonState {
 // D-Bus interface struct
 // ---------------------------------------------------------------------------
 
-/// Implements the com.webauthnproxy.Daemon D-Bus interface.
+/// Implements the com.mykeyproxy.Daemon D-Bus interface.
 ///
 /// Holds an `Arc<DaemonState>` so all method calls share the same session store
 /// and replay cache.  `Arc` is used (not `Mutex<DaemonState>`) because the
@@ -67,7 +67,7 @@ impl DaemonInterface {
 // zbus interface implementation
 // ---------------------------------------------------------------------------
 
-#[zbus::interface(name = "com.webauthnproxy.Daemon")]
+#[zbus::interface(name = "com.mykeyproxy.Daemon")]
 impl DaemonInterface {
     // ── Connect ─────────────────────────────────────────────────────────────
     /// Called by the native host on startup.

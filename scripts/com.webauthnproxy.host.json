@@ -1,9 +1,0 @@
-{
-  "name": "com.webauthnproxy.host",
-  "description": "WebAuthn Proxy Native Messaging Host",
-  "path": "/usr/local/bin/webauthn-proxy-host",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://EXTENSION_ID_PLACEHOLDER/"
-  ]
-}

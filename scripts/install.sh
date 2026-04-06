@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — WebAuthn Proxy full installer
+# install.sh — MyKey Proxy full installer
 # Handles: Secure Boot setup, TPM verification, build, install, extension setup, health check
 # Run as normal user: ./scripts/install.sh (will prompt for sudo when needed)
 
@@ -179,8 +179,8 @@ esac
 # Check if our binaries are already signed
 ALREADY_SIGNED=0
 if command -v sbctl &>/dev/null; then
-    if sbctl list-files 2>/dev/null | grep -q "webauthn-proxy"; then
-        ok "WebAuthn Proxy binaries already enrolled in sbctl"
+    if sbctl list-files 2>/dev/null | grep -q "mykey-proxy"; then
+        ok "MyKey Proxy binaries already enrolled in sbctl"
         ALREADY_SIGNED=1
     fi
 fi
@@ -205,15 +205,15 @@ elif [[ "${USING_MOK}" -eq 1 ]]; then
     echo "  the following files with your own keys or the proxy"
     echo "  daemon will refuse to start:"
     echo ""
-    echo "    /usr/local/bin/webauthn-proxy-host"
-    echo "    /usr/local/bin/webauthn-proxy-daemon"
-    echo "    /usr/local/bin/webauthn-proxy-tray"
+    echo "    /usr/local/bin/mykey-proxy-host"
+    echo "    /usr/local/bin/mykey-proxy-daemon"
+    echo "    /usr/local/bin/mykey-proxy-tray"
     echo ""
     echo "  Sign them with sbsign, pesign, or your preferred tool."
     echo "  Example with sbsign:"
     echo "    sudo sbsign --key /path/to/MOK.key --cert /path/to/MOK.crt \\"
-    echo "      --output /usr/local/bin/webauthn-proxy-daemon \\"
-    echo "      /usr/local/bin/webauthn-proxy-daemon"
+    echo "      --output /usr/local/bin/mykey-proxy-daemon \\"
+    echo "      /usr/local/bin/mykey-proxy-daemon"
     echo ""
     echo "  The proxy will not run without Secure Boot active and"
     echo "  all binaries signed."
@@ -224,7 +224,7 @@ elif [[ "${USING_MOK}" -eq 1 ]]; then
 elif [[ "${SB_STATE}" == "disabled" && "${ALREADY_SIGNED}" -eq 0 ]]; then
     echo ""
     echo "  Secure Boot is not enabled on this system."
-    echo "  WebAuthn Proxy works best with Secure Boot enabled as it"
+    echo "  MyKey Proxy works best with Secure Boot enabled as it"
     echo "  provides hardware-level protection for your authentication keys."
     echo ""
     if confirm "Would you like this script to guide you through Secure Boot setup?"; then
@@ -543,22 +543,22 @@ echo "════════════════════════�
 echo " Phase 4 — Build and Install"
 echo "════════════════════════════════════════════════════════════"
 
-HOST_BINARY="webauthn-proxy-host"
-DAEMON_BINARY="webauthn-proxy-daemon"
-TRAY_BINARY="webauthn-proxy-tray"
+HOST_BINARY="mykey-proxy-host"
+DAEMON_BINARY="mykey-proxy-daemon"
+TRAY_BINARY="mykey-proxy-tray"
 HOST_DEST="/usr/local/bin/${HOST_BINARY}"
 DAEMON_DEST="/usr/local/bin/${DAEMON_BINARY}"
 TRAY_DEST="/usr/local/bin/${TRAY_BINARY}"
-HOST_MANIFEST_SRC="${REPO_ROOT}/scripts/com.webauthnproxy.host.json"
-SYSTEMD_UNIT_SRC="${REPO_ROOT}/scripts/webauthn-proxy-daemon.service"
-TRAY_SERVICE_SRC="${REPO_ROOT}/scripts/webauthn-proxy-tray.service"
-WEBAUTHN_DIR="/etc/webauthn-proxy"
+HOST_MANIFEST_SRC="${REPO_ROOT}/scripts/com.mykeyproxy.host.json"
+SYSTEMD_UNIT_SRC="${REPO_ROOT}/scripts/mykey-proxy-daemon.service"
+TRAY_SERVICE_SRC="${REPO_ROOT}/scripts/mykey-proxy-tray.service"
+WEBAUTHN_DIR="/etc/mykey-proxy"
 CREDENTIAL_DIR="${WEBAUTHN_DIR}/credentials"
 KEY_DIR="${WEBAUTHN_DIR}/keys"
 TRUSTED_HASHES="${WEBAUTHN_DIR}/trusted-binaries.json"
-POLKIT_POLICY="/usr/share/polkit-1/actions/com.webauthnproxy.authenticate.policy"
-SYSTEMD_UNIT="/etc/systemd/system/webauthn-proxy-daemon.service"
-DAEMON_USER="webauthn-proxy"
+POLKIT_POLICY="/usr/share/polkit-1/actions/com.mykeyproxy.authenticate.policy"
+SYSTEMD_UNIT="/etc/systemd/system/mykey-proxy-daemon.service"
+DAEMON_USER="mykey-proxy"
 CHROME_NMH_DIR="/etc/opt/chrome/native-messaging-hosts"
 CHROMIUM_NMH_DIR="/etc/chromium/native-messaging-hosts"
 
@@ -577,11 +577,11 @@ sudo usermod -aG tss "${DAEMON_USER}" 2>/dev/null || true
 # Install sudoers rule so the daemon can run pkcheck as root (polkit
 # cross-identity checks require uid 0)
 echo "==> Installing sudoers rule for polkit check..."
-sudo tee /etc/sudoers.d/webauthn-proxy > /dev/null << 'EOF'
-# Allow webauthn-proxy daemon to run pkcheck as root for user presence verification
-webauthn-proxy ALL=(root) NOPASSWD: /usr/bin/pkcheck
+sudo tee /etc/sudoers.d/mykey-proxy > /dev/null << 'EOF'
+# Allow mykey-proxy daemon to run pkcheck as root for user presence verification
+mykey-proxy ALL=(root) NOPASSWD: /usr/bin/pkcheck
 EOF
-sudo chmod 0440 /etc/sudoers.d/webauthn-proxy
+sudo chmod 0440 /etc/sudoers.d/mykey-proxy
 ok "Sudoers rule installed."
 
 # ── 4.2 Build native host ─────────────────────────────────────────────────
@@ -606,7 +606,7 @@ sudo install -m 0755 "${REPO_ROOT}/daemon/target/release/${DAEMON_BINARY}"    "$
 ok "${HOST_DEST}"
 ok "${DAEMON_DEST}"
 
-# ── 4.5 Create /etc/webauthn-proxy/ directory structure ───────────────────
+# ── 4.5 Create /etc/mykey-proxy/ directory structure ───────────────────
 echo ""
 info "Creating ${WEBAUTHN_DIR}/ directories..."
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${WEBAUTHN_DIR}"
@@ -632,14 +632,14 @@ ok "daemon:       ${DAEMON_HASH}"
 # ── 4.8 Install D-Bus system policy ──────────────────────────────────────
 echo ""
 info "Installing D-Bus system policy..."
-sudo install -m 0644 "${REPO_ROOT}/scripts/com.webauthnproxy.Daemon.conf" \
-    "/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf"
+sudo install -m 0644 "${REPO_ROOT}/scripts/com.mykeyproxy.Daemon.conf" \
+    "/etc/dbus-1/system.d/com.mykeyproxy.Daemon.conf"
 ok "D-Bus policy installed."
 
 # ── 4.9 Install polkit policy ─────────────────────────────────────────────
 echo ""
 info "Installing polkit policy..."
-sudo install -m 0644 "${REPO_ROOT}/scripts/com.webauthnproxy.authenticate.policy" \
+sudo install -m 0644 "${REPO_ROOT}/scripts/com.mykeyproxy.authenticate.policy" \
     "${POLKIT_POLICY}"
 ok "Polkit policy installed."
 
@@ -647,7 +647,7 @@ ok "Polkit policy installed."
 install_manifest() {
     local dest_dir="$1"
     sudo mkdir -p "${dest_dir}"
-    sudo install -m 0644 "${HOST_MANIFEST_SRC}" "${dest_dir}/com.webauthnproxy.host.json"
+    sudo install -m 0644 "${HOST_MANIFEST_SRC}" "${dest_dir}/com.mykeyproxy.host.json"
     ok "Manifest installed to ${dest_dir}/"
 }
 
@@ -661,7 +661,7 @@ echo ""
 info "Installing systemd service unit..."
 sudo install -m 0644 "${SYSTEMD_UNIT_SRC}" "${SYSTEMD_UNIT}"
 sudo systemctl daemon-reload
-sudo systemctl enable webauthn-proxy-daemon
+sudo systemctl enable mykey-proxy-daemon
 ok "Daemon service enabled."
 
 # ── 4.12 Build systray ────────────────────────────────────────────────────
@@ -686,8 +686,8 @@ SYSTEMD_USER_DIR="${REAL_USER_HOME}/.config/systemd/user"
 
 mkdir -p "${SYSTEMD_USER_DIR}"
 
-cp "${TRAY_SERVICE_SRC}" "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service"
-chmod 0644 "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service"
+cp "${TRAY_SERVICE_SRC}" "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
+chmod 0644 "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
 
 XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
 DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
@@ -695,13 +695,13 @@ DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
 
 XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
 DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
-    systemctl --user enable webauthn-proxy-tray
+    systemctl --user enable mykey-proxy-tray
 
 # Symlink fallback to guarantee enable persists
 AUTOSTART_DIR="${SYSTEMD_USER_DIR}/default.target.wants"
 mkdir -p "${AUTOSTART_DIR}"
-ln -sf "${SYSTEMD_USER_DIR}/webauthn-proxy-tray.service" \
-       "${AUTOSTART_DIR}/webauthn-proxy-tray.service"
+ln -sf "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service" \
+       "${AUTOSTART_DIR}/mykey-proxy-tray.service"
 
 ok "Tray service installed and enabled for user '${REAL_USER}'"
 
@@ -806,29 +806,29 @@ echo " Phase 6 — Start Services"
 echo "════════════════════════════════════════════════════════════"
 
 echo ""
-info "Starting webauthn-proxy-daemon..."
-sudo systemctl start webauthn-proxy-daemon
+info "Starting mykey-proxy-daemon..."
+sudo systemctl start mykey-proxy-daemon
 sleep 2
-if systemctl is-active --quiet webauthn-proxy-daemon; then
-    ok "webauthn-proxy-daemon is running"
+if systemctl is-active --quiet mykey-proxy-daemon; then
+    ok "mykey-proxy-daemon is running"
 else
-    fail "webauthn-proxy-daemon failed to start"
-    fail "Check: journalctl -u webauthn-proxy-daemon -n 20"
+    fail "mykey-proxy-daemon failed to start"
+    fail "Check: journalctl -u mykey-proxy-daemon -n 20"
     FAILED=1
 fi
 
-info "Starting webauthn-proxy-tray..."
+info "Starting mykey-proxy-tray..."
 XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
 DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
-    systemctl --user start webauthn-proxy-tray 2>/dev/null || true
+    systemctl --user start mykey-proxy-tray 2>/dev/null || true
 sleep 1
 if XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
    DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
-   systemctl --user is-active --quiet webauthn-proxy-tray 2>/dev/null; then
-    ok "webauthn-proxy-tray is running"
+   systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
+    ok "mykey-proxy-tray is running"
 else
-    warn "webauthn-proxy-tray did not start — you can start it manually:"
-    warn "systemctl --user start webauthn-proxy-tray"
+    warn "mykey-proxy-tray did not start — you can start it manually:"
+    warn "systemctl --user start mykey-proxy-tray"
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -936,7 +936,7 @@ else
     # Step 4 — Get extension ID
     echo ""
     echo "  Step 4: Copy your Extension ID"
-    echo "  The WebAuthn Proxy extension should now appear on the page."
+    echo "  The MyKey Proxy extension should now appear on the page."
     echo "  Under the extension name you will see an ID that looks like:"
     echo "      abcdefghijklmnopabcdefghijklmnop"
     echo "  (32 characters, lowercase letters a through p only)"
@@ -959,10 +959,10 @@ else
     # Apply extension ID to all manifest files
     UPDATED=0
     for f in \
-        "${CHROME_NMH_DIR}/com.webauthnproxy.host.json" \
-        "${CHROMIUM_NMH_DIR}/com.webauthnproxy.host.json" \
-        "${HOME}/.config/google-chrome/NativeMessagingHosts/com.webauthnproxy.host.json" \
-        "${HOME}/.config/chromium/NativeMessagingHosts/com.webauthnproxy.host.json"
+        "${CHROME_NMH_DIR}/com.mykeyproxy.host.json" \
+        "${CHROMIUM_NMH_DIR}/com.mykeyproxy.host.json" \
+        "${HOME}/.config/google-chrome/NativeMessagingHosts/com.mykeyproxy.host.json" \
+        "${HOME}/.config/chromium/NativeMessagingHosts/com.mykeyproxy.host.json"
     do
         if [[ -f "${f}" ]]; then
             sudo sed -i "s|EXTENSION_ID_PLACEHOLDER|${EXTENSION_ID}|g" "${f}"
@@ -980,7 +980,7 @@ else
     echo ""
     echo "  Step 5: Reload the extension"
     echo "  Go back to chrome://extensions/ and click the"
-    echo "  refresh/reload icon on the WebAuthn Proxy extension card."
+    echo "  refresh/reload icon on the MyKey Proxy extension card."
     echo ""
     read -rp "  Press Enter once you have reloaded the extension..."
 fi
@@ -1027,7 +1027,7 @@ echo "[4/8] Configuration..."
 for f in \
     "${TRUSTED_HASHES}" \
     "${POLKIT_POLICY}" \
-    "/etc/dbus-1/system.d/com.webauthnproxy.Daemon.conf"
+    "/etc/dbus-1/system.d/com.mykeyproxy.Daemon.conf"
 do
     if sudo test -f "${f}"; then
         ok "${f}"
@@ -1041,8 +1041,8 @@ done
 echo "[5/8] Extension ID..."
 ID_SET=0
 for f in \
-    "${CHROME_NMH_DIR}/com.webauthnproxy.host.json" \
-    "${CHROMIUM_NMH_DIR}/com.webauthnproxy.host.json"
+    "${CHROME_NMH_DIR}/com.mykeyproxy.host.json" \
+    "${CHROMIUM_NMH_DIR}/com.mykeyproxy.host.json"
 do
     if [[ -f "${f}" ]] && ! grep -q "EXTENSION_ID_PLACEHOLDER" "${f}"; then
         ok "Extension ID configured in ${f}"
@@ -1060,7 +1060,7 @@ if command -v python3 &>/dev/null; then
     sudo python3 - << 'PYEOF'
 import json, hashlib, sys
 try:
-    with open("/etc/webauthn-proxy/trusted-binaries.json") as f:
+    with open("/etc/mykey-proxy/trusted-binaries.json") as f:
         entries = json.load(f)
     all_ok = True
     for entry in entries:
@@ -1083,10 +1083,10 @@ fi
 
 # [7/8] Daemon service
 echo "[7/8] Daemon service..."
-if systemctl is-active --quiet webauthn-proxy-daemon; then
-    ok "webauthn-proxy-daemon is running"
+if systemctl is-active --quiet mykey-proxy-daemon; then
+    ok "mykey-proxy-daemon is running"
 else
-    fail "webauthn-proxy-daemon is not running"
+    fail "mykey-proxy-daemon is not running"
     FAILED=1
 fi
 
@@ -1094,11 +1094,11 @@ fi
 echo "[8/8] Tray service..."
 if XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
    DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
-   systemctl --user is-active --quiet webauthn-proxy-tray 2>/dev/null; then
-    ok "webauthn-proxy-tray is running"
+   systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
+    ok "mykey-proxy-tray is running"
 else
-    warn "webauthn-proxy-tray is not running"
-    warn "Start with: systemctl --user start webauthn-proxy-tray"
+    warn "mykey-proxy-tray is not running"
+    warn "Start with: systemctl --user start mykey-proxy-tray"
 fi
 
 # ── Final summary ─────────────────────────────────────────────────────────
@@ -1114,8 +1114,8 @@ if [[ "${FAILED}" -eq 0 ]]; then
     echo "   4. Complete registration then test Sign In"
     echo ""
     echo " Live logs:"
-    echo "   journalctl -u webauthn-proxy-daemon -f"
-    echo "   tail -f /tmp/webauthn-proxy-host.log"
+    echo "   journalctl -u mykey-proxy-daemon -f"
+    echo "   tail -f /tmp/mykey-proxy-host.log"
 else
     echo " Installation completed with errors — review the output above."
     echo " Fix any failed checks and run ./scripts/install.sh again."

@@ -185,11 +185,11 @@ struct TrustedBinary {
     sha256: String, // hex-encoded
 }
 
-/// Read /etc/webauthn-proxy/trusted-binaries.json, SHA-256 each binary, and
+/// Read /etc/mykey-proxy/trusted-binaries.json, SHA-256 each binary, and
 /// verify the hashes match.  Missing file is treated as "not yet set up" and
 /// returns Ok (the install script creates this file).
 pub fn check_binary_hashes() -> Result<(), String> {
-    let manifest_path = "/etc/webauthn-proxy/trusted-binaries.json";
+    let manifest_path = "/etc/mykey-proxy/trusted-binaries.json";
 
     let data = match std::fs::read(manifest_path) {
         Ok(d) => d,

@@ -8,7 +8,7 @@ use log::info;
 use crate::protocol::{CreateRequest, CreateResponse, CredentialMeta};
 use crate::session::{self, DaemonSession};
 
-pub(crate) const CREDENTIAL_DIR: &str = "/etc/webauthn-proxy/credentials";
+pub(crate) const CREDENTIAL_DIR: &str = "/etc/mykey-proxy/credentials";
 
 pub fn handle_create(request: CreateRequest, session: &DaemonSession) -> Result<CreateResponse, String> {
     info!(

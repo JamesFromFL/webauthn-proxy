@@ -2,7 +2,7 @@
 
 ## Project context
 
-webauthn-proxy is a local-first WebAuthn proxy for Linux. It intercepts browser passkey requests, enforces PAM user presence, and seals credential keys to the machine's TPM2 chip via PCR binding.
+mykey-proxy is a local-first WebAuthn proxy for Linux. It intercepts browser passkey requests, enforces PAM user presence, and seals credential keys to the machine's TPM2 chip via PCR binding.
 
 The repo has two main runtime components:
 

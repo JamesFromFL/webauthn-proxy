@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "WebAuthn Proxy",
+  "name": "MyKey Proxy",
   "version": "0.1.0",
   "description": "Bridges WebAuthn platform authenticator requests to Linux PAM + TPM2 authentication",
   "permissions": [
