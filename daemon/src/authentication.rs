@@ -1,8 +1,8 @@
 // authentication.rs — WebAuthn authentication handler for the daemon.
 //
-// Orchestrates PAM user-presence verification, credential resolution, TPM key
-// unsealing, authenticatorData assembly, ECDSA assertion signing, and sign
-// counter increment.
+// Orchestrates polkit user-presence verification, credential resolution, TPM
+// key unsealing, authenticatorData assembly, ECDSA assertion signing, and
+// sign counter increment.
 
 use log::info;
 use serde_json::Value;
@@ -19,13 +19,13 @@ use crate::tpm;
 ///
 /// Returns a `GetResponse` ready to be serialised and sent back to the
 /// native host, or an error string on any failure.
-pub async fn handle_get(request: GetRequest) -> Result<GetResponse, String> {
-    // ── 1. PAM user-presence gate ─────────────────────────────────────────
-    let pam_ok = pam::verify_user_presence()
+pub async fn handle_get(request: GetRequest, calling_pid: u32) -> Result<GetResponse, String> {
+    // ── 1. Polkit user-presence gate ──────────────────────────────────────
+    let auth_ok = pam::verify_user_presence(calling_pid)
         .await
-        .map_err(|e| format!("PAM error: {e}"))?;
-    if !pam_ok {
-        return Err("PAM authentication failed — user presence not confirmed".to_string());
+        .map_err(|e| format!("Polkit error: {e}"))?;
+    if !auth_ok {
+        return Err("Polkit authentication failed — user presence not confirmed".to_string());
     }
 
     // ── 2. Resolve credential ─────────────────────────────────────────────

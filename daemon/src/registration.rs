@@ -1,7 +1,7 @@
 // registration.rs — WebAuthn registration handler for the daemon.
 //
-// Orchestrates PAM user-presence verification, P-256 key generation, TPM key
-// sealing, authenticatorData assembly, and attestation object encoding.
+// Orchestrates polkit user-presence verification, P-256 key generation, TPM
+// key sealing, authenticatorData assembly, and attestation object encoding.
 
 use log::info;
 use serde_json::Value;
@@ -18,13 +18,13 @@ use crate::tpm;
 ///
 /// Returns a `CreateResponse` ready to be serialised and sent back to the
 /// native host, or an error string on any failure.
-pub async fn handle_create(request: CreateRequest) -> Result<CreateResponse, String> {
-    // ── 1. PAM user-presence gate ─────────────────────────────────────────
-    let pam_ok = pam::verify_user_presence()
+pub async fn handle_create(request: CreateRequest, calling_pid: u32) -> Result<CreateResponse, String> {
+    // ── 1. Polkit user-presence gate ──────────────────────────────────────
+    let auth_ok = pam::verify_user_presence(calling_pid)
         .await
-        .map_err(|e| format!("PAM error: {e}"))?;
-    if !pam_ok {
-        return Err("PAM authentication failed — user presence not confirmed".to_string());
+        .map_err(|e| format!("Polkit error: {e}"))?;
+    if !auth_ok {
+        return Err("Polkit authentication failed — user presence not confirmed".to_string());
     }
 
     // ── 2. Generate P-256 keypair ─────────────────────────────────────────
