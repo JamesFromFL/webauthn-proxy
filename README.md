@@ -41,51 +41,34 @@ Parts of this project were developed with the assistance of AI tools including C
 
 If you find a security issue please open a GitHub issue or contact me directly before disclosing publicly.
 
-## Project Status
+## Project Roadmap
 
-### Done
-- Chrome MV3 extension with WebAuthn request interception
-- Native messaging host — browser to system bridge
-- Persistent background daemon with D-Bus communication
-- End-to-end AES-256-GCM encrypted communication between all components
-- HMAC request signing to prevent message tampering
-- Replay attack protection with sequence numbers and timestamp windows
-- Process ancestry verification — only a real Chrome process can talk to the daemon
-- PAM authentication gate — your Linux credentials must pass before any key is touched
-- P-256 cryptographic key generation and ECDSA signing
-- Credential storage and lifecycle management
-- Hardened systemd service with strict permissions and memory protections
-- Guided installer with Secure Boot detection and setup
-- TPM2 verification and prerequisite enforcement
-- Per-file EFI signing with sbctl --save for automatic re-signing on updates
-- Browser extension guided setup with automatic extension ID configuration
-- System tray indicator showing proxy is running
-- Full 8-point health check on every install
-- Uninstall script
-- Real TPM2 hardware key sealing with PCR 0+7 policy binding
-- Polkit desktop authentication agent integration
-- Authentication retry/cooldown brute-force protection (3 attempts, exponential cooldown: 1m/5m/15m/30m/1h/2h/5h)
-- rpIdHash fix for Chrome extension origin (chrome-extension:// prefix)
+### Complete
+- ✅ WebAuthn request interception and proxy via Chrome MV3 extension
+- ✅ Native host, daemon, and system tray — full five-layer architecture
+- ✅ AES-256-GCM encrypted IPC with HMAC signing and replay protection
+- ✅ TPM2 hardware key sealing with PCR 0+7 policy binding
+- ✅ Polkit desktop authentication with brute-force cooldown protection
+- ✅ Process ancestry verification and binary integrity checks
+- ✅ Hardened systemd service, guided installer, and uninstall script
 
 ### In Progress
-- Fingerprint authentication via fprintd and face recognition via Howdy as polkit factor
-- Hard enforcement of Secure Boot requirement at daemon startup
+- ⏳ Hard Secure Boot enforcement at daemon startup
 
-### Planned — Linux Platform
-- GTK4 Credential Manager (separate binary: `webauthn-proxy-manager`)
-  - Credential list: key name, date/time created, origin type (website/extension), application (parsed from rpId), user-configurable nickname
-  - Credential deletion (requires polkit re-authentication)
-  - Secure Folder: TPM-encrypted AES-256-GCM folder, all-or-nothing access, password-locked, listed in credential manager
-  - File/folder encryption tool (future)
-- Biometric Manager (inside GTK4 GUI)
-  - Manage Howdy (face recognition) and fprintd (fingerprint) enrollments
-  - List: type, date, time, scan name, user nickname
-  - Enrollment via system tools (full in-app enrollment on roadmap)
-- Mobile Pairing (UI placeholder in GTK4 GUI — planned feature)
+### To Do
+- 🔵 Fingerprint (fprintd) and face recognition (Howdy) as polkit factors
+- 🔵 GTK4 Credential Manager (`webauthn-proxy-manager`)
+  - Credentials: key name, created date/time, type, application, nickname
+  - Secure Folder: TPM-encrypted, all-or-nothing, password-locked
+  - Biometrics: manage Howdy and fprintd enrollments with nicknames
+  - Mobile Bridge: placeholder — planned feature
+- 🔵 AUR package + Chrome Web Store submission
 
-### Planned — Mobile Bridge
-
-Pair your phone with your Linux machine. When a site requests authentication your phone receives the request, you approve it using Face ID, fingerprint, or PIN, and the signed response comes back to your browser automatically. Works on iOS and Android. Uses local network when available, encrypted relay as fallback.
+### Planned — 
+- 🔵 Mobile Bridge
+  - Pair phone via QR code, approve requests via Face ID/fingerprint/PIN
+  - Local network with encrypted relay fallback
+  - iOS and Android
 
 ## Installation
 
