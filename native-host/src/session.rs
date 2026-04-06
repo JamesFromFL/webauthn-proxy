@@ -2,6 +2,9 @@
 //
 // EncryptedPayload and RequestEnvelope mirror daemon/src/crypto.rs and
 // daemon/src/dbus_interface.rs exactly so both ends agree on wire format.
+//
+// The session token is received as raw bytes over the kernel-mediated D-Bus
+// system bus — no bootstrap key decryption is required.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -126,9 +129,7 @@ impl DaemonSession {
     pub fn new() -> Result<Self, String> {
         let client = DaemonClient::new()?;
         let pid = std::process::id();
-        let wrapped = client.connect_daemon(pid)?;
-        let bootstrap_key = load_bootstrap_key()?;
-        let token_bytes = unwrap_token(&wrapped, &bootstrap_key)?;
+        let token_bytes = client.connect_daemon(pid)?;
         if token_bytes.len() != 32 {
             return Err(format!("Session token wrong length: {} bytes", token_bytes.len()));
         }
@@ -136,32 +137,4 @@ impl DaemonSession {
         token.copy_from_slice(&token_bytes);
         Ok(DaemonSession { client, token })
     }
-}
-
-fn load_bootstrap_key() -> Result<Zeroizing<[u8; 32]>, String> {
-    let hex_str = std::fs::read_to_string("/etc/webauthn-proxy/bootstrap.key")
-        .map_err(|e| format!("Cannot read bootstrap key: {e}"))?;
-    let bytes = hex::decode(hex_str.trim())
-        .map_err(|e| format!("Invalid bootstrap key hex: {e}"))?;
-    if bytes.len() != 32 {
-        return Err(format!("Bootstrap key wrong length: {} bytes", bytes.len()));
-    }
-    let mut key = Zeroizing::new([0u8; 32]);
-    key.copy_from_slice(&bytes);
-    Ok(key)
-}
-
-fn unwrap_token(encrypted_json: &str, bootstrap_key: &[u8; 32]) -> Result<Zeroizing<Vec<u8>>, String> {
-    let payload: EncryptedPayload = serde_json::from_str(encrypted_json)
-        .map_err(|e| format!("Invalid session token envelope: {e}"))?;
-
-    let cipher = Aes256Gcm::new_from_slice(bootstrap_key)
-        .map_err(|e| format!("AES key init failed: {e}"))?;
-    let nonce = Nonce::from_slice(&payload.nonce);
-
-    let plaintext = cipher
-        .decrypt(nonce, payload.ciphertext.as_ref())
-        .map_err(|_| "Session token decryption failed".to_string())?;
-
-    Ok(Zeroizing::new(plaintext))
 }

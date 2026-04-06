@@ -23,7 +23,7 @@ impl DaemonClient {
         .map_err(|e| format!("D-Bus proxy creation failed: {e}"))
     }
 
-    pub fn connect_daemon(&self, pid: u32) -> Result<String, String> {
+    pub fn connect_daemon(&self, pid: u32) -> Result<Vec<u8>, String> {
         self.proxy()?
             .call("Connect", &(pid,))
             .map_err(|e| format!("D-Bus Connect failed: {e}"))
