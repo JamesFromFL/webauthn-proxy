@@ -3,6 +3,11 @@
 # Handles: Secure Boot setup, TPM verification, build, install, extension setup, health check
 # Run as normal user: ./scripts/install.sh (will prompt for sudo when needed)
 
+if [[ $EUID -eq 0 ]]; then
+    echo "Do not run this script as root. Run as your normal user: ./scripts/install.sh"
+    exit 1
+fi
+
 set -euo pipefail
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -58,8 +63,8 @@ export PATH="$(dirname "${CARGO}"):${PATH}"
 info "Using cargo: ${CARGO}"
 
 # ── Real user (for tray service and home-dir operations) ─────────────────────
-REAL_USER="${USER}"
-REAL_USER_HOME="${HOME}"
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 # ── Distro detection ──────────────────────────────────────────────────────────
 detect_distro() {
@@ -682,25 +687,20 @@ info "Installing tray user service..."
 REAL_USER_ID=$(id -u "${REAL_USER}")
 REAL_XDG_RUNTIME="/run/user/${REAL_USER_ID}"
 REAL_DBUS="unix:path=${REAL_XDG_RUNTIME}/bus"
-SYSTEMD_USER_DIR="${REAL_USER_HOME}/.config/systemd/user"
+SYSTEMD_USER_DIR="${REAL_HOME}/.config/systemd/user"
 
-mkdir -p "${SYSTEMD_USER_DIR}"
+sudo -u "$REAL_USER" mkdir -p "${SYSTEMD_USER_DIR}"
 
-cp "${TRAY_SERVICE_SRC}" "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
-chmod 0644 "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
+sudo install -m 644 -o "$REAL_USER" "${TRAY_SERVICE_SRC}" \
+    "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
 
-XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
-DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
-    systemctl --user daemon-reload
-
-XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
-DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
-    systemctl --user enable mykey-proxy-tray
+sudo -u "$REAL_USER" systemctl --user daemon-reload
+sudo -u "$REAL_USER" systemctl --user enable --now mykey-proxy-tray
 
 # Symlink fallback to guarantee enable persists
 AUTOSTART_DIR="${SYSTEMD_USER_DIR}/default.target.wants"
-mkdir -p "${AUTOSTART_DIR}"
-ln -sf "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service" \
+sudo -u "$REAL_USER" mkdir -p "${AUTOSTART_DIR}"
+sudo -u "$REAL_USER" ln -sf "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service" \
        "${AUTOSTART_DIR}/mykey-proxy-tray.service"
 
 ok "Tray service installed and enabled for user '${REAL_USER}'"
@@ -763,6 +763,16 @@ if command -v sbctl &>/dev/null && [[ "${SB_STATE:-}" != "skip" && "${SB_STATE:-
         done
     fi
 
+    # ── Sign newly installed MyKey Proxy binaries ─────────────────
+    echo ""
+    info "Signing MyKey Proxy binaries..."
+    for bin in "${HOST_DEST}" "${DAEMON_DEST}" "${TRAY_DEST}"; do
+        if [[ -f "${bin}" ]]; then
+            sudo sbctl sign --save "${bin}"
+            ok "Signed: ${bin}"
+        fi
+    done
+
     # ── Verify and summarise ──────────────────────────────────────
     echo ""
     info "Verifying signatures..."
@@ -818,13 +828,9 @@ else
 fi
 
 info "Starting mykey-proxy-tray..."
-XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
-DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
-    systemctl --user start mykey-proxy-tray 2>/dev/null || true
+sudo -u "$REAL_USER" systemctl --user start mykey-proxy-tray 2>/dev/null || true
 sleep 1
-if XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
-   DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
-   systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
+if sudo -u "$REAL_USER" systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
     ok "mykey-proxy-tray is running"
 else
     warn "mykey-proxy-tray did not start — you can start it manually:"
@@ -870,9 +876,10 @@ SELECTED_BINARY=""
 
 if [[ ${#BROWSER_NAMES[@]} -eq 0 ]]; then
     echo ""
-    fail "No supported Chromium-based browser found"
-    fail "Install one of: Google Chrome, Chromium, Brave, Edge, Vivaldi"
-    fail "The webAuthenticationProxy API is Chromium-only — Firefox is not supported"
+    warn "No supported Chromium-based browser detected"
+    warn "Install one of: Google Chrome, Chromium, Brave, Edge, Vivaldi"
+    warn "The webAuthenticationProxy API is Chromium-only — Firefox is not supported"
+    warn "You will need to open your browser manually for the steps below"
     FAILED=1
 else
     echo ""
@@ -896,94 +903,97 @@ else
             fi
         done
     fi
-
-    echo ""
-    echo "  ────────────────────────────────────────────────────────"
-    echo "  We will now open ${SELECTED_BROWSER} to load the extension."
-    echo "  Follow each step carefully."
-    echo "  ────────────────────────────────────────────────────────"
-    echo ""
-    read -rp "  Press Enter when you are ready to continue..."
-
-    # Step 1 — Open browser to extensions page
-    echo ""
-    info "Opening browser to chrome://extensions — enable Developer Mode"
-    info "then click 'Load unpacked' and select: ${REPO_ROOT}/extension"
-    echo ""
-    "${SELECTED_BINARY}" "chrome://extensions" &
-    echo ""
-    read -rp "  Press Enter once the browser is open and you can see chrome://extensions/..."
-
-    # Step 2 — Developer mode
-    echo ""
-    echo "  Step 2: Enable Developer Mode"
-    echo "  Look for the 'Developer mode' toggle in the top right corner"
-    echo "  of the extensions page and turn it ON."
-    echo ""
-    read -rp "  Press Enter once Developer Mode is enabled..."
-
-    # Step 3 — Load unpacked
-    echo ""
-    echo "  Step 3: Load the extension"
-    echo "  Click the 'Load unpacked' button that appeared after enabling"
-    echo "  Developer Mode."
-    echo ""
-    echo "  When the folder picker opens, navigate to:"
-    echo "      ${REPO_ROOT}/extension"
-    echo ""
-    read -rp "  Press Enter once you have selected the extension folder..."
-
-    # Step 4 — Get extension ID
-    echo ""
-    echo "  Step 4: Copy your Extension ID"
-    echo "  The MyKey Proxy extension should now appear on the page."
-    echo "  Under the extension name you will see an ID that looks like:"
-    echo "      abcdefghijklmnopabcdefghijklmnop"
-    echo "  (32 characters, lowercase letters a through p only)"
-    echo ""
-
-    EXTENSION_ID=""
-    while true; do
-        read -rp "  Paste your Extension ID here: " EXTENSION_ID
-        if [[ "${EXTENSION_ID}" =~ ^[a-p]{32}$ ]]; then
-            ok "Valid Extension ID: ${EXTENSION_ID}"
-            break
-        else
-            echo ""
-            fail "Invalid format — must be exactly 32 characters using only letters a-p"
-            echo "  Please check the ID and try again."
-            echo ""
-        fi
-    done
-
-    # Apply extension ID to all manifest files
-    UPDATED=0
-    for f in \
-        "${CHROME_NMH_DIR}/com.mykeyproxy.host.json" \
-        "${CHROMIUM_NMH_DIR}/com.mykeyproxy.host.json" \
-        "${HOME}/.config/google-chrome/NativeMessagingHosts/com.mykeyproxy.host.json" \
-        "${HOME}/.config/chromium/NativeMessagingHosts/com.mykeyproxy.host.json"
-    do
-        if [[ -f "${f}" ]]; then
-            sudo sed -i "s|EXTENSION_ID_PLACEHOLDER|${EXTENSION_ID}|g" "${f}"
-            ok "Updated: ${f}"
-            UPDATED=1
-        fi
-    done
-
-    if [[ "${UPDATED}" -eq 0 ]]; then
-        fail "No manifest files found to update"
-        FAILED=1
-    fi
-
-    # Step 5 — Reload extension
-    echo ""
-    echo "  Step 5: Reload the extension"
-    echo "  Go back to chrome://extensions/ and click the"
-    echo "  refresh/reload icon on the MyKey Proxy extension card."
-    echo ""
-    read -rp "  Press Enter once you have reloaded the extension..."
 fi
+
+echo ""
+echo "  ────────────────────────────────────────────────────────"
+echo "  Load the MyKey Proxy extension in your browser."
+echo "  Follow each step carefully."
+echo "  ────────────────────────────────────────────────────────"
+echo ""
+read -rp "  Press Enter when you are ready to continue..."
+
+# Step 1 — Open browser to extensions page
+echo ""
+info "Step 1: Open your browser to chrome://extensions"
+info "Enable Developer Mode, then click 'Load unpacked' and select: ${REPO_ROOT}/extension"
+echo ""
+if [[ -n "${SELECTED_BINARY:-}" ]]; then
+    info "Opening ${SELECTED_BROWSER} now..."
+    "${SELECTED_BINARY}" "chrome://extensions" &
+fi
+echo ""
+read -rp "  Press Enter once the browser is open and you can see chrome://extensions/..."
+
+# Step 2 — Developer mode
+echo ""
+echo "  Step 2: Enable Developer Mode"
+echo "  Look for the 'Developer mode' toggle in the top right corner"
+echo "  of the extensions page and turn it ON."
+echo ""
+read -rp "  Press Enter once Developer Mode is enabled..."
+
+# Step 3 — Load unpacked
+echo ""
+echo "  Step 3: Load the extension"
+echo "  Click the 'Load unpacked' button that appeared after enabling"
+echo "  Developer Mode."
+echo ""
+echo "  When the folder picker opens, navigate to:"
+echo "      ${REPO_ROOT}/extension"
+echo ""
+read -rp "  Press Enter once you have selected the extension folder..."
+
+# Step 4 — Get extension ID
+echo ""
+echo "  Step 4: Copy your Extension ID"
+echo "  The MyKey Proxy extension should now appear on the page."
+echo "  Under the extension name you will see an ID that looks like:"
+echo "      abcdefghijklmnopabcdefghijklmnop"
+echo "  (32 characters, lowercase letters a through p only)"
+echo ""
+
+EXTENSION_ID=""
+while true; do
+    read -rp "  Paste your Extension ID here: " EXTENSION_ID
+    if [[ "${EXTENSION_ID}" =~ ^[a-p]{32}$ ]]; then
+        ok "Valid Extension ID: ${EXTENSION_ID}"
+        break
+    else
+        echo ""
+        fail "Invalid format — must be exactly 32 characters using only letters a-p"
+        echo "  Please check the ID and try again."
+        echo ""
+    fi
+done
+
+# Apply extension ID to all manifest files
+UPDATED=0
+for f in \
+    "${CHROME_NMH_DIR}/com.mykeyproxy.host.json" \
+    "${CHROMIUM_NMH_DIR}/com.mykeyproxy.host.json" \
+    "${REAL_HOME}/.config/google-chrome/NativeMessagingHosts/com.mykeyproxy.host.json" \
+    "${REAL_HOME}/.config/chromium/NativeMessagingHosts/com.mykeyproxy.host.json"
+do
+    if [[ -f "${f}" ]]; then
+        sudo sed -i "s|EXTENSION_ID_PLACEHOLDER|${EXTENSION_ID}|g" "${f}"
+        ok "Updated: ${f}"
+        UPDATED=1
+    fi
+done
+
+if [[ "${UPDATED}" -eq 0 ]]; then
+    fail "No manifest files found to update"
+    FAILED=1
+fi
+
+# Step 5 — Reload extension
+echo ""
+echo "  Step 5: Reload the extension"
+echo "  Go back to chrome://extensions/ and click the"
+echo "  refresh/reload icon on the MyKey Proxy extension card."
+echo ""
+read -rp "  Press Enter once you have reloaded the extension..."
 
 # ════════════════════════════════════════════════════════════════════════════
 # PHASE 8 — FINAL HEALTH CHECK
@@ -1092,9 +1102,7 @@ fi
 
 # [8/8] Tray service
 echo "[8/8] Tray service..."
-if XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
-   DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
-   systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
+if sudo -u "$REAL_USER" systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
     ok "mykey-proxy-tray is running"
 else
     warn "mykey-proxy-tray is not running"
