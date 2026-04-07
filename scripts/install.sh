@@ -689,18 +689,18 @@ REAL_XDG_RUNTIME="/run/user/${REAL_USER_ID}"
 REAL_DBUS="unix:path=${REAL_XDG_RUNTIME}/bus"
 SYSTEMD_USER_DIR="${REAL_HOME}/.config/systemd/user"
 
-sudo -u "$REAL_USER" mkdir -p "${SYSTEMD_USER_DIR}"
+mkdir -p "${SYSTEMD_USER_DIR}"
 
-sudo install -m 644 -o "$REAL_USER" "${TRAY_SERVICE_SRC}" \
-    "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
+cp "${TRAY_SERVICE_SRC}" "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
+chmod 0644 "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
 
-sudo -u "$REAL_USER" systemctl --user daemon-reload
-sudo -u "$REAL_USER" systemctl --user enable --now mykey-proxy-tray
+systemctl --user daemon-reload
+systemctl --user enable --now mykey-proxy-tray
 
 # Symlink fallback to guarantee enable persists
 AUTOSTART_DIR="${SYSTEMD_USER_DIR}/default.target.wants"
-sudo -u "$REAL_USER" mkdir -p "${AUTOSTART_DIR}"
-sudo -u "$REAL_USER" ln -sf "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service" \
+mkdir -p "${AUTOSTART_DIR}"
+ln -sf "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service" \
        "${AUTOSTART_DIR}/mykey-proxy-tray.service"
 
 ok "Tray service installed and enabled for user '${REAL_USER}'"
@@ -763,16 +763,6 @@ if command -v sbctl &>/dev/null && [[ "${SB_STATE:-}" != "skip" && "${SB_STATE:-
         done
     fi
 
-    # ── Sign newly installed MyKey Proxy binaries ─────────────────
-    echo ""
-    info "Signing MyKey Proxy binaries..."
-    for bin in "${HOST_DEST}" "${DAEMON_DEST}" "${TRAY_DEST}"; do
-        if [[ -f "${bin}" ]]; then
-            sudo sbctl sign --save "${bin}"
-            ok "Signed: ${bin}"
-        fi
-    done
-
     # ── Verify and summarise ──────────────────────────────────────
     echo ""
     info "Verifying signatures..."
@@ -828,9 +818,9 @@ else
 fi
 
 info "Starting mykey-proxy-tray..."
-sudo -u "$REAL_USER" systemctl --user start mykey-proxy-tray 2>/dev/null || true
+systemctl --user start mykey-proxy-tray 2>/dev/null || true
 sleep 1
-if sudo -u "$REAL_USER" systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
+if systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
     ok "mykey-proxy-tray is running"
 else
     warn "mykey-proxy-tray did not start — you can start it manually:"
@@ -1102,7 +1092,7 @@ fi
 
 # [8/8] Tray service
 echo "[8/8] Tray service..."
-if sudo -u "$REAL_USER" systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
+if systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
     ok "mykey-proxy-tray is running"
 else
     warn "mykey-proxy-tray is not running"
