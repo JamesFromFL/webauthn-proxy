@@ -1,0 +1,21 @@
+/* styles.css — MyKey Proxy Manager application styles */
+
+.tab-content {
+    padding: 12px;
+}
+
+columnview header button {
+    font-weight: bold;
+}
+
+.destructive-action {
+    /* GTK theme handles destructive-action colour; class applied in code */
+}
+
+.monospace {
+    font-family: monospace;
+}
+
+.dim-label {
+    opacity: 0.55;
+}

@@ -1,0 +1,14 @@
+[package]
+name = "mykey-proxy-manager"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mykey-proxy-manager"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_12"] }
+glib = "0.20"
+log = "0.4"
+env_logger = "0.11"
