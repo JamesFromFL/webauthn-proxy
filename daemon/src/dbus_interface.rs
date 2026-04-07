@@ -1,4 +1,4 @@
-// dbus_interface.rs — zbus D-Bus interface for the WebAuthn Proxy daemon.
+// dbus_interface.rs — zbus D-Bus interface for the MyKey Proxy daemon.
 //
 // Interface name:  com.mykeyproxy.Daemon
 // Object path:     /com/mykeyproxy/Daemon

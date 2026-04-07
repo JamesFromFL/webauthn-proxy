@@ -27,7 +27,7 @@ fn setup_logger() {
         .create(true)
         .append(true)
         .open("/tmp/mykey-proxy-host.log")
-        .expect("Failed to open /tmp/webauthn-proxy-host.log");
+        .expect("Failed to open /tmp/mykey-proxy-host.log");
 
     env_logger::Builder::new()
         .target(env_logger::Target::Pipe(Box::new(log_file)))
@@ -195,5 +195,5 @@ fn main() {
     }
 
     let _ = session.client.disconnect(std::process::id());
-    info!("webauthn-proxy-host exiting");
+    info!("mykey-proxy-host exiting");
 }

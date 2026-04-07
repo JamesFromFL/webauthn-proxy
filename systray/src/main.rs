@@ -9,7 +9,7 @@ fn setup_logger() {
         .create(true)
         .append(true)
         .open("/tmp/mykey-proxy-tray.log")
-        .expect("Failed to open /tmp/webauthn-proxy-tray.log");
+        .expect("Failed to open /tmp/mykey-proxy-tray.log");
 
     env_logger::Builder::new()
         .target(env_logger::Target::Pipe(Box::new(log_file)))

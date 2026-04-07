@@ -1,4 +1,4 @@
-// main.rs — WebAuthn Proxy D-Bus daemon entry point.
+// main.rs — MyKey Proxy D-Bus daemon entry point.
 //
 // Startup order:
 //   1. Initialise file logger (never stdout/stderr in production)
@@ -35,7 +35,7 @@ fn setup_logger() {
         .create(true)
         .append(true)
         .open("/tmp/mykey-proxy-daemon.log")
-        .expect("Failed to open /tmp/webauthn-proxy-daemon.log");
+        .expect("Failed to open /tmp/mykey-proxy-daemon.log");
 
     env_logger::Builder::new()
         .target(env_logger::Target::Pipe(Box::new(log_file)))
@@ -61,7 +61,7 @@ async fn main() {
     // ── Prerequisites ─────────────────────────────────────────────────────
     if let Err(e) = prereqs::enforce_prereqs() {
         error!("Prerequisites check failed: {}", e);
-        eprintln!("[webauthn-proxy-daemon] Prerequisites check failed: {e}");
+        eprintln!("[mykey-proxy-daemon] Prerequisites check failed: {e}");
         std::process::exit(1);
     }
 
@@ -79,19 +79,19 @@ async fn main() {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to build D-Bus connection: {}", e);
-                eprintln!("[webauthn-proxy-daemon] D-Bus connection failed: {e}");
+                eprintln!("[mykey-proxy-daemon] D-Bus connection failed: {e}");
                 std::process::exit(1);
             }
         },
         Err(e) => {
             error!("Failed to configure D-Bus builder: {}", e);
-            eprintln!("[webauthn-proxy-daemon] D-Bus builder failed: {e}");
+            eprintln!("[mykey-proxy-daemon] D-Bus builder failed: {e}");
             std::process::exit(1);
         }
     };
 
     info!(
-        "D-Bus service registered: name='com.webauthnproxy.Daemon' path='/com/webauthnproxy/Daemon'"
+        "D-Bus service registered: name='com.mykeyproxy.Daemon' path='/com/mykeyproxy/Daemon'"
     );
 
     // Keep the connection alive.  The daemon exits only on signal or fatal error.

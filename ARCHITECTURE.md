@@ -89,7 +89,7 @@ Replay protection: the daemon rejects any sequence number already seen and any t
 
 **Files:** `daemon/src/`
 
-Persistent Rust service registered on the D-Bus system bus as `com.mykeyproxy.Daemon` at `/com/webauthnproxy/Daemon`. Runs as a dedicated system user (`mykey-proxy`) under a hardened systemd unit.
+Persistent Rust service registered on the D-Bus system bus as `com.mykeyproxy.Daemon` at `/com/mykeyproxy/Daemon`. Runs as a dedicated system user (`mykey-proxy`) under a hardened systemd unit.
 
 Startup sequence:
 ```
