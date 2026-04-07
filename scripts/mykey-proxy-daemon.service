@@ -16,7 +16,6 @@ User=mykey-proxy
 # Systemd hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectMemory=yes
 MemoryDenyWriteExecute=yes
 ReadWritePaths=/etc/mykey-proxy
 ReadOnlyPaths=/etc
