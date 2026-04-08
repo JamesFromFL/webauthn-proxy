@@ -2,159 +2,265 @@
 
 ## Scope
 
-This threat model applies to the local authentication proxy running on a single Linux machine. It covers the attack surface between the browser, the native host, the daemon, and the hardware security components (PAM, TPM2). It does not cover network-level attacks, cloud infrastructure, or the security of third-party services like NordPass that consume the WebAuthn assertions this proxy produces.
+This threat model applies to the local authentication proxy running on a single Linux machine.
+
+It covers the attack surface between:
+- Browser
+- Extension
+- Native host
+- Daemon
+- Hardware-backed security components (PAM, TPM2)
+
+It does **not** cover:
+- Network-level attacks
+- Cloud infrastructure
+- Third-party services that consume WebAuthn assertions
+
+---
+
+## Security Assumptions
+
+This design relies on the following assumptions:
+
+- The operating system is not kernel-compromised
+- Chromium/Chrome sandboxing and native messaging enforcement function correctly
+- D-Bus policy is correctly installed and not modified by an attacker
+- PAM and polkit are trusted and correctly configured
+- TPM firmware and platform firmware are not already compromised
+- The system boot chain is protected by Secure Boot
+
+If these assumptions do not hold, the security guarantees of this system degrade accordingly.
+
+---
+
+## Security Requirements
+
+The following are **hard requirements** of the system:
+
+- TPM 2.0 must be present and functional  
+- Secure Boot must be enabled and enforced  
+
+These are foundational to the security model:
+
+- Secure Boot ensures the boot chain (firmware → bootloader → kernel) is verified before execution
+- TPM PCR binding ensures keys are only unsealed when the system is in a known-good measured state
+
+Without both:
+- Key sealing degrades to software-level protection
+- Offline tampering and alternate boot attacks become viable
+
+The daemon validates these requirements at startup. Systems not meeting these conditions are considered **unsupported and insecure by design**.
+
+---
 
 ## Trust Boundaries
 
-The system has four trust boundaries, each with different guarantees:
+The system is divided into the following trust boundaries:
 
-1. **Browser ↔ Extension (Chrome sandbox)** — The extension runs inside Chrome's sandbox and can only communicate with the browser's WebAuthn proxy API. Chrome enforces this boundary; the extension cannot directly access the filesystem or system calls.
+### 1. Browser ↔ Extension (Chrome sandbox)
 
-2. **Extension ↔ Native Host (Chrome Native Messaging, extension ID locked)** — Chrome launches the native host binary and connects it to the extension over stdin/stdout using a 4-byte length-prefixed JSON protocol. Only extensions whose ID matches the one registered in the installed host manifest can open this channel. Chrome enforces the ID check.
+- The extension runs inside the browser sandbox
+- Cannot access the filesystem or make arbitrary system calls
+- Communication is restricted to browser APIs
 
-3. **Native Host ↔ Daemon (D-Bus system bus, encrypted + HMAC signed)** — The native host connects to the daemon over the D-Bus system bus. Every message is AES-256-GCM encrypted and HMAC-SHA256 signed using a session token issued only after the caller passes process verification. The system bus is kernel-mediated and policy-controlled — only processes authorised by the D-Bus policy file (`/etc/dbus-1/system.d/com.mykeyproxy.Daemon.conf`) can reach the daemon service.
+### 2. Extension ↔ Native Host (Native Messaging)
 
-4. **Daemon ↔ Hardware (PAM stack, TPM2 chip)** — The daemon calls into the PAM stack for user presence verification and communicates with the TPM2 resource manager for key sealing and signing. The daemon runs as a dedicated system user with no login shell and strict systemd confinement.
+- Communication occurs over stdin/stdout using Chrome Native Messaging
+- Access is restricted to registered extension IDs
+- Browser enforces extension identity validation
 
-## System Requirements as Security Dependencies
+### 3. Native Host ↔ Daemon (D-Bus system bus)
 
-TPM 2.0 and Secure Boot are hard requirements, not suggestions. Here is why:
+- Communication occurs over the system D-Bus
+- Governed by a strict policy file:
+  `/etc/dbus-1/system.d/com.mykeyproxy.Daemon.conf`
+- All application-layer payloads are:
+  - AES-256-GCM encrypted
+  - HMAC-SHA256 signed
+- Session tokens are issued only after process verification
 
-- **Secure Boot** ensures every stage of the boot chain — firmware, bootloader, kernel — is signature-verified before the OS loads. Without it, an attacker with physical access can boot a live USB and tamper with the system undetected.
-- **TPM 2.0 with PCR binding** means private keys are sealed to the measured boot state of the machine. The TPM will only release a key if the machine booted into the exact same verified state as when the key was created. A modified system — different bootloader, different kernel, Secure Boot disabled — produces different PCR values and the keys do not unseal.
-- **Without both**, TPM key sealing collapses to software-only protection: keys sealed without Secure Boot can be extracted by booting alternate media; PCR binding without Secure Boot can be spoofed by manipulating what gets measured.
-- The daemon checks both at startup and logs warnings if either is missing. Hard enforcement — refusing to operate — is planned.
+### 4. Daemon ↔ Hardware (PAM + TPM2)
+
+- PAM handles user presence verification
+- TPM2 handles key sealing and signing
+- Daemon runs under a dedicated system user with systemd confinement
+
+---
 
 ## Attack Surfaces and Mitigations
 
 ### 1. Fake Caller — IPC Spoofing
 
-**Threat:** A malicious process on the machine pretends to be the native host and sends crafted requests to the daemon to trigger authentication without user involvement.
+**Threat:**  
+A malicious process attempts to impersonate the native host and send forged authentication requests.
 
-**Mitigations implemented:**
-- Process ancestry verification: the daemon reads `/proc/{pid}/exe`, `/proc/{pid}/status` (PPid), and `/proc/{pid}/cmdline` — all three must resolve to a real Chrome/Chromium binary, and its parent must also be Chrome.
-- Session tokens are issued only to verified processes, generated as 32 bytes from a CSPRNG, mlocked in memory, and zeroized on session end.
-- HMAC-SHA256 is computed over every request payload using the session token — an attacker cannot forge a valid HMAC without the token.
+**Mitigations:**
+- Process ancestry verification (`/proc/{pid}/exe`, `status`, `cmdline`)
+- Parent process must resolve to a valid Chromium/Chrome binary
+- Session tokens issued only after verification
+- Tokens are:
+  - CSPRNG-generated (32 bytes)
+  - mlocked in memory
+  - zeroized on session end
+- All messages require a valid HMAC-SHA256
 
-### 2. IPC Eavesdropping — Passive Sniffing
+---
 
-**Threat:** A process monitors D-Bus traffic (e.g. via `dbus-monitor`) and reads messages in transit.
+### 2. IPC Eavesdropping — Passive Monitoring
 
-**Mitigations implemented:**
-- All IPC payloads are encrypted with AES-256-GCM keyed on the session token.
-- The D-Bus system bus is policy-controlled — unprivileged processes cannot monitor system bus traffic without explicit policy allowances.
-- The session token is transmitted over the kernel-mediated system bus at session establishment; no additional bootstrap key encryption layer is needed or present.
-- An eavesdropper sees only ciphertext they cannot decrypt without the session token.
+**Threat:**  
+An attacker attempts to observe D-Bus traffic.
+
+**Mitigations:**
+- Payloads encrypted using AES-256-GCM
+- D-Bus system bus enforces policy restrictions
+- Observers without proper access should only see ciphertext
+
+---
 
 ### 3. Replay Attack
 
-**Threat:** Attacker captures a legitimate request and replays it later to get another signed assertion without triggering PAM.
+**Threat:**  
+Captured requests are replayed to bypass authentication.
 
-**Mitigations implemented:**
-- Every request includes a monotonic sequence number and a Unix timestamp.
-- The daemon maintains a replay cache and rejects any sequence number already seen.
-- Timestamp window of 30 seconds — requests outside this window are rejected regardless of sequence number.
-- Signed assertions are challenge-bound server-side — even a stolen assertion cannot be replayed to a different authentication session on the relying party.
+**Mitigations:**
+- Monotonic sequence numbers per session
+- 30-second timestamp validity window
+- Replay cache rejects previously seen sequence numbers
+- WebAuthn assertions are challenge-bound server-side
+
+---
 
 ### 4. Response Interception
 
-**Threat:** Attacker lets a legitimate request go through, then intercepts the daemon's response containing the signed assertion before the native host receives it.
+**Threat:**  
+An attacker intercepts daemon responses containing signed assertions.
 
-**Mitigations implemented:**
-- The response is AES-256-GCM encrypted with the session token — only the native host that was issued that token can decrypt it.
-- The signed assertion is bound to the specific server-issued challenge and is useless outside that authentication session.
+**Mitigations:**
+- Responses encrypted with session token
+- Assertions bound to server-issued challenge
+- Intercepted responses should not be reusable outside the original context
+
+---
 
 ### 5. Session Token Theft
 
-**Threat:** Attacker targets the session token itself — with it they can forge requests and decrypt responses.
+**Threat:**  
+An attacker attempts to extract or reuse session tokens.
 
-**Mitigations implemented:**
-- Session token exists in memory only, never written to disk.
-- The memory page is mlocked to prevent the token from being swapped to disk.
-- Token is zeroized on session end via the `Zeroizing` wrapper.
-- The daemon runs as a dedicated system user (`mykey-proxy`) — a user-space attacker running as a different user cannot read daemon memory.
-- The session token is transmitted over the kernel-mediated D-Bus system bus. The bus enforces the policy file before delivering the `Connect` response — the token is never present on a channel accessible to unprivileged user processes. The former bootstrap key encryption layer has been eliminated as an attack surface; D-Bus system bus isolation provides equivalent protection with a simpler trust model.
+**Mitigations:**
+- Tokens exist only in memory (never persisted)
+- mlock prevents swapping
+- Explicit zeroization on session end
+- Daemon runs under an isolated system user
+- D-Bus policy restricts exposure during transmission
+
+---
 
 ### 6. Binary Substitution
 
-**Threat:** Attacker replaces `/usr/local/bin/mykey-proxy-host` or the daemon binary with a malicious version.
+**Threat:**  
+System binaries are replaced with malicious versions.
 
-**Mitigations implemented:**
-- The install script SHA-256 hashes both binaries and writes them to `/etc/mykey-proxy/trusted-binaries.json`.
-- The daemon verifies both hashes at startup and refuses to issue session tokens if either hash does not match.
-- Both binaries are installed as root-owned and are not writable by the daemon user.
+**Mitigations:**
+- SHA-256 hashes stored in `/etc/mykey-proxy/trusted-binaries.json`
+- Verified at daemon startup
+- Mismatch prevents session token issuance
+- Binaries are root-owned and not writable by the daemon user
+
+---
 
 ### 7. Boot-Time Tampering
 
-**Threat:** Attacker boots a live USB, modifies binaries or PAM configuration, reboots — and the modified system unseals keys normally.
+**Threat:**  
+Offline modification via alternate boot media.
 
 **Mitigations:**
-- **Secure Boot (required):** Rejects unsigned bootloaders and kernels — the live USB attack fails at boot before any modifications can take effect.
-- **TPM2 PCR binding (implemented):** Keys are sealed to PCR 0 (firmware measurement) and PCR 7 (Secure Boot state). Any modification changes the PCR values and the keys will not unseal.
-- If Secure Boot is disabled since the last run, the daemon detects the state change and refuses to unseal keys pending re-enrollment.
+- Secure Boot enforces the signed boot chain
+- TPM PCR 0 + 7 binding prevents key unsealing on modified systems
+- System state changes invalidate sealed keys
+
+---
 
 ### 8. PAM Stack Tampering
 
-**Threat:** Attacker modifies PAM configuration or replaces a PAM module to make authentication always succeed without verifying credentials.
+**Threat:**  
+Attacker modifies PAM configuration to bypass authentication.
 
 **Mitigations:**
-- PAM config files are root-owned — the daemon user cannot modify anything under `/etc/pam.d/`.
-- The systemd service unit includes `ProtectSystem=strict` and `ReadOnlyPaths=/etc`.
-- Replacement of PAM modules can be caught by the binary hash manifest if the relevant modules are added to `trusted-binaries.json` (planned extension of the hash manifest scope).
+- `/etc/pam.d/` is root-owned
+- systemd service uses:
+  - `ProtectSystem=strict`
+  - `ReadOnlyPaths=/etc`
+- Future: extend binary hash verification to PAM modules
+
+---
 
 ### 9. Cross-Machine Key Theft
 
-**Threat:** Attacker copies key material from disk and attempts to use it on a different machine.
+**Threat:**  
+Key material copied to another machine.
 
 **Mitigations:**
-- TPM2 keys are physically bound to the TPM chip on this machine — they cannot be exported or used on any other hardware.
-- All credential keys are sealed to the TPM chip using PCR 0+7 policy binding. Keys cannot be transferred to another machine.
+- TPM keys are hardware-bound
+- PCR-bound sealing prevents reuse on different systems
 
-### 10. Unauthorized Mobile Forwarding (Planned Feature)
+---
 
-**Threat:** Attacker intercepts or spoofs the mobile bridge to receive authentication requests or forge approvals.
+### 10. Authentication Brute Force
 
-**Planned mitigations:**
-- QR-code based pairing with an ECDH key exchange — a shared secret is established at pairing time and is never transmitted after that.
-- All mobile bridge traffic is encrypted end-to-end with the pairing shared secret.
-- The relay server (if used) sees only ciphertext and cannot read or modify requests or responses.
-- The phone app requires biometric or PIN approval for every request — passive interception cannot produce a valid approval.
-- Pairing can be revoked from both the desktop and the phone app at any time.
+**Threat:**  
+Repeated authentication attempts to guess credentials.
+
+**Mitigations:**
+- Maximum 3 attempts per session (polkit)
+- Progressive cooldown:
+  1m → 5m → 15m → 30m → 1h → 2h → 5h
+- Successful authentication resets the counter
+
+---
+
+### 11. Mobile Companion (Future Design)
+
+**Threat:**  
+Interception or spoofing of the mobile approval channel.
+
+**Planned Mitigations:**
+- QR-based pairing with ECDH key exchange
+- End-to-end encrypted communication
+- Relay server (if used) sees only ciphertext
+- Per-request biometric/PIN approval on device
+- Revocable pairing
+
+---
+
+## Out of Scope
+
+The following are explicitly not addressed:
+
+- Remote attackers (no network exposure)
+- Kernel-level compromise (ring 0)
+- Physical attacks on TPM hardware (e.g., decapping)
+- Compromised firmware or UEFI
+- Coerced user authentication
+- Security of third-party relying parties
+
+---
+
+## Known Limitations
+
+- Secure Boot enforcement is a design requirement, but not yet a hard runtime failure  
+- Mobile companion functionality is not implemented; threat model reflects intended design  
+
+---
 
 ## Hardware Attack Surface
 
-TPM chip decapping, DMA attacks before OS load, and compromised UEFI firmware are acknowledged as theoretical attack surfaces. These require nation-state level resources or physical hardware access and are out of scope for this project. Enabling IOMMU/VT-d in BIOS settings mitigates DMA attacks at the kernel level and is recommended.
+Advanced attacks such as:
+- DMA attacks before OS load
+- TPM physical extraction
+- Firmware compromise
 
-## Fully Compromised OS
+are considered out of scope.
 
-If an attacker has kernel ring-0 access, all software security guarantees on the machine are void regardless of what this project does. This is out of scope and is the correct place to draw the boundary. The TPM provides some protection below this level through PCR-bound sealing, but a compromised kernel can still intercept unsealed key material at the point it enters user space.
-
-## Coerced Authentication
-
-If a user is physically forced to authenticate, no software solution can prevent it. Out of scope.
-
-### 11. Authentication Brute Force
-
-**Threat:** Attacker with physical or remote access attempts to guess the user's password by repeatedly triggering WebAuthn authentication requests.
-
-**Mitigations implemented:**
-- Maximum 3 authentication attempts per session via polkit.
-- After a failed session (all 3 attempts fail), a cooldown is imposed before the next attempt is permitted.
-- Cooldown schedule (per failed session count): 1 min → 5 min → 15 min → 30 min → 1 hour → 2 hours → 5 hours.
-- Cooldown state is maintained in daemon memory — resets on daemon restart (intentional: daemon restart requires root access which is a higher privilege than the attack assumes).
-- A successful authentication resets the failed session counter to zero.
-
-## What This Project Does Not Protect Against
-
-- Remote attackers — no network surface is exposed by this project
-- Kernel-level compromise
-- Physical hardware attacks on the TPM chip itself
-- Coerced user authentication
-- Security of third-party services that consume the WebAuthn assertions this proxy produces
-
-## Current Known Gaps
-
-These are honest gaps in the current implementation, not omissions from the design:
-
-- **Secure Boot enforcement is currently a warning, not a hard exit.** The daemon checks the Secure Boot EFI variable at startup and logs a warning if it is disabled, but continues running. Hard enforcement is planned.
-- **The mobile bridge does not exist yet.** The threat model for it in this document is speculative design intent. It will be updated when the feature is implemented.
+Enabling IOMMU/VT-d is recommended to reduce DMA attack surface.
