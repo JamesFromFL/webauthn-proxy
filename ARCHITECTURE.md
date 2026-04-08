@@ -1,5 +1,12 @@
 # Architecture — MyKey Proxy
 
+> ⚠️ **Architecture Document In Progress**  
+> This document is currently out of date and reflects an earlier design phase.  
+> The system has since expanded significantly beyond a WebAuthn proxy to become a broader authentication platform.
+>  
+> An updated architecture overview will be provided in a future revision.  
+> For accurate security assumptions and trust boundaries, refer to `THREAT_MODEL.md`.
+
 ## Overview
 
 MyKey Proxy intercepts WebAuthn platform authenticator requests in Chrome and routes them through a secure local stack instead of letting them fail on Linux. When a site calls `navigator.credentials.create()` or `.get()`, the browser extension catches the call before it reaches the platform — which on Linux has no built-in authenticator — builds the required cryptographic structures, and coordinates with a persistent background daemon to verify the user and produce a valid signed response. The browser and the relying party receive a standards-compliant WebAuthn response and need no modification.
