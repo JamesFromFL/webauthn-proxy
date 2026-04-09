@@ -1,23 +1,23 @@
 [Unit]
-Description=MyKey Proxy Daemon
-Documentation=https://github.com/JamesFromFL/mykey-proxy
+Description=MyKey Daemon
+Documentation=https://github.com/JamesFromFL/mykey
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mykey-proxy-daemon
+ExecStart=/usr/local/bin/mykey-daemon
 Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 Restart=on-failure
 RestartSec=5s
 
 # Run as a dedicated unprivileged system user
-User=mykey-proxy
+User=mykey
 
 # Systemd hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 MemoryDenyWriteExecute=yes
-ReadWritePaths=/etc/mykey-proxy
+ReadWritePaths=/etc/mykey
 ReadOnlyPaths=/etc
 ReadWritePaths=/tmp
 PrivateTmp=yes

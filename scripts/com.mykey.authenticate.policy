@@ -3,14 +3,14 @@
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <vendor>MyKey Proxy</vendor>
-  <vendor_url>https://github.com/JamesFromFL/mykey-proxy</vendor_url>
+  <vendor>MyKey</vendor>
+  <vendor_url>https://github.com/JamesFromFL/mykey</vendor_url>
 
-  <action id="com.mykeyproxy.authenticate">
-    <description>Authenticate with MyKey Proxy</description>
-    <message>MyKey Proxy needs to verify your identity before completing authentication.</message>
+  <action id="com.mykey.authenticate">
+    <description>Authenticate with MyKey</description>
+    <message>MyKey needs to verify your identity before completing authentication.</message>
     <icon_name>security-high</icon_name>
-    <annotate key="org.freedesktop.policykit.owner">unix-user:mykey-proxy</annotate>
+    <annotate key="org.freedesktop.policykit.owner">unix-user:mykey</annotate>
     <defaults>
       <allow_any>auth_self</allow_any>
       <allow_inactive>auth_self</allow_inactive>

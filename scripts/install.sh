@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — MyKey Proxy full installer
+# install.sh — MyKey full installer
 # Handles: Secure Boot setup, TPM verification, build, install, extension setup, health check
 # Run as normal user: ./scripts/install.sh (will prompt for sudo when needed)
 
@@ -184,8 +184,8 @@ esac
 # Check if our binaries are already signed
 ALREADY_SIGNED=0
 if command -v sbctl &>/dev/null; then
-    if sbctl list-files 2>/dev/null | grep -q "mykey-proxy"; then
-        ok "MyKey Proxy binaries already enrolled in sbctl"
+    if sbctl list-files 2>/dev/null | grep -q "mykey"; then
+        ok "MyKey binaries already enrolled in sbctl"
         ALREADY_SIGNED=1
     fi
 fi
@@ -210,15 +210,15 @@ elif [[ "${USING_MOK}" -eq 1 ]]; then
     echo "  the following files with your own keys or the proxy"
     echo "  daemon will refuse to start:"
     echo ""
-    echo "    /usr/local/bin/mykey-proxy-host"
-    echo "    /usr/local/bin/mykey-proxy-daemon"
-    echo "    /usr/local/bin/mykey-proxy-tray"
+    echo "    /usr/local/bin/mykey-host"
+    echo "    /usr/local/bin/mykey-daemon"
+    echo "    /usr/local/bin/mykey-tray"
     echo ""
     echo "  Sign them with sbsign, pesign, or your preferred tool."
     echo "  Example with sbsign:"
     echo "    sudo sbsign --key /path/to/MOK.key --cert /path/to/MOK.crt \\"
-    echo "      --output /usr/local/bin/mykey-proxy-daemon \\"
-    echo "      /usr/local/bin/mykey-proxy-daemon"
+    echo "      --output /usr/local/bin/mykey-daemon \\"
+    echo "      /usr/local/bin/mykey-daemon"
     echo ""
     echo "  The proxy will not run without Secure Boot active and"
     echo "  all binaries signed."
@@ -229,7 +229,7 @@ elif [[ "${USING_MOK}" -eq 1 ]]; then
 elif [[ "${SB_STATE}" == "disabled" && "${ALREADY_SIGNED}" -eq 0 ]]; then
     echo ""
     echo "  Secure Boot is not enabled on this system."
-    echo "  MyKey Proxy works best with Secure Boot enabled as it"
+    echo "  MyKey works best with Secure Boot enabled as it"
     echo "  provides hardware-level protection for your authentication keys."
     echo ""
     if confirm "Would you like this script to guide you through Secure Boot setup?"; then
@@ -548,22 +548,22 @@ echo "════════════════════════�
 echo " Phase 4 — Build and Install"
 echo "════════════════════════════════════════════════════════════"
 
-HOST_BINARY="mykey-proxy-host"
-DAEMON_BINARY="mykey-proxy-daemon"
-TRAY_BINARY="mykey-proxy-tray"
+HOST_BINARY="mykey-host"
+DAEMON_BINARY="mykey-daemon"
+TRAY_BINARY="mykey-tray"
 HOST_DEST="/usr/local/bin/${HOST_BINARY}"
 DAEMON_DEST="/usr/local/bin/${DAEMON_BINARY}"
 TRAY_DEST="/usr/local/bin/${TRAY_BINARY}"
-HOST_MANIFEST_SRC="${REPO_ROOT}/scripts/com.mykeyproxy.host.json"
-SYSTEMD_UNIT_SRC="${REPO_ROOT}/scripts/mykey-proxy-daemon.service"
-TRAY_SERVICE_SRC="${REPO_ROOT}/scripts/mykey-proxy-tray.service"
-WEBAUTHN_DIR="/etc/mykey-proxy"
+HOST_MANIFEST_SRC="${REPO_ROOT}/scripts/com.mykey.host.json"
+SYSTEMD_UNIT_SRC="${REPO_ROOT}/scripts/mykey-daemon.service"
+TRAY_SERVICE_SRC="${REPO_ROOT}/scripts/mykey-tray.service"
+WEBAUTHN_DIR="/etc/mykey"
 CREDENTIAL_DIR="${WEBAUTHN_DIR}/credentials"
 KEY_DIR="${WEBAUTHN_DIR}/keys"
 TRUSTED_HASHES="${WEBAUTHN_DIR}/trusted-binaries.json"
-POLKIT_POLICY="/usr/share/polkit-1/actions/com.mykeyproxy.authenticate.policy"
-SYSTEMD_UNIT="/etc/systemd/system/mykey-proxy-daemon.service"
-DAEMON_USER="mykey-proxy"
+POLKIT_POLICY="/usr/share/polkit-1/actions/com.mykey.authenticate.policy"
+SYSTEMD_UNIT="/etc/systemd/system/mykey-daemon.service"
+DAEMON_USER="mykey"
 CHROME_NMH_DIR="/etc/opt/chrome/native-messaging-hosts"
 CHROMIUM_NMH_DIR="/etc/chromium/native-messaging-hosts"
 
@@ -582,17 +582,17 @@ sudo usermod -aG tss "${DAEMON_USER}" 2>/dev/null || true
 # Install sudoers rule so the daemon can run pkcheck as root (polkit
 # cross-identity checks require uid 0)
 echo "==> Installing sudoers rule for polkit check..."
-sudo tee /etc/sudoers.d/mykey-proxy > /dev/null << 'EOF'
-# Allow mykey-proxy daemon to run pkcheck as root for user presence verification
-mykey-proxy ALL=(root) NOPASSWD: /usr/bin/pkcheck
+sudo tee /etc/sudoers.d/mykey > /dev/null << 'EOF'
+# Allow mykey daemon to run pkcheck as root for user presence verification
+mykey ALL=(root) NOPASSWD: /usr/bin/pkcheck
 EOF
-sudo chmod 0440 /etc/sudoers.d/mykey-proxy
+sudo chmod 0440 /etc/sudoers.d/mykey
 ok "Sudoers rule installed."
 
 # ── 4.2 Build native host ─────────────────────────────────────────────────
 echo ""
 info "Building ${HOST_BINARY} (release)..."
-cd "${REPO_ROOT}/native-host"
+cd "${REPO_ROOT}/mykey-host"
 RUSTFLAGS="-A warnings" "${CARGO}" build --release
 ok "Build complete: ${HOST_BINARY}"
 
@@ -606,12 +606,12 @@ ok "Build complete: ${DAEMON_BINARY}"
 # ── 4.4 Install binaries ──────────────────────────────────────────────────
 echo ""
 info "Installing binaries..."
-sudo install -m 0755 "${REPO_ROOT}/native-host/target/release/${HOST_BINARY}" "${HOST_DEST}"
+sudo install -m 0755 "${REPO_ROOT}/mykey-host/target/release/${HOST_BINARY}" "${HOST_DEST}"
 sudo install -m 0755 "${REPO_ROOT}/daemon/target/release/${DAEMON_BINARY}"    "${DAEMON_DEST}"
 ok "${HOST_DEST}"
 ok "${DAEMON_DEST}"
 
-# ── 4.5 Create /etc/mykey-proxy/ directory structure ───────────────────
+# ── 4.5 Create /etc/mykey/ directory structure ───────────────────
 echo ""
 info "Creating ${WEBAUTHN_DIR}/ directories..."
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${WEBAUTHN_DIR}"
@@ -631,20 +631,20 @@ sudo tee "${TRUSTED_HASHES}" > /dev/null << EOF
 ]
 EOF
 sudo chmod 0644 "${TRUSTED_HASHES}"
-ok "native-host:  ${HOST_HASH}"
+ok "mykey-host:  ${HOST_HASH}"
 ok "daemon:       ${DAEMON_HASH}"
 
 # ── 4.8 Install D-Bus system policy ──────────────────────────────────────
 echo ""
 info "Installing D-Bus system policy..."
-sudo install -m 0644 "${REPO_ROOT}/scripts/com.mykeyproxy.Daemon.conf" \
-    "/etc/dbus-1/system.d/com.mykeyproxy.Daemon.conf"
+sudo install -m 0644 "${REPO_ROOT}/scripts/com.mykey.Daemon.conf" \
+    "/etc/dbus-1/system.d/com.mykey.Daemon.conf"
 ok "D-Bus policy installed."
 
 # ── 4.9 Install polkit policy ─────────────────────────────────────────────
 echo ""
 info "Installing polkit policy..."
-sudo install -m 0644 "${REPO_ROOT}/scripts/com.mykeyproxy.authenticate.policy" \
+sudo install -m 0644 "${REPO_ROOT}/scripts/com.mykey.authenticate.policy" \
     "${POLKIT_POLICY}"
 ok "Polkit policy installed."
 
@@ -652,7 +652,7 @@ ok "Polkit policy installed."
 install_manifest() {
     local dest_dir="$1"
     sudo mkdir -p "${dest_dir}"
-    sudo install -m 0644 "${HOST_MANIFEST_SRC}" "${dest_dir}/com.mykeyproxy.host.json"
+    sudo install -m 0644 "${HOST_MANIFEST_SRC}" "${dest_dir}/com.mykey.host.json"
     ok "Manifest installed to ${dest_dir}/"
 }
 
@@ -666,18 +666,18 @@ echo ""
 info "Installing systemd service unit..."
 sudo install -m 0644 "${SYSTEMD_UNIT_SRC}" "${SYSTEMD_UNIT}"
 sudo systemctl daemon-reload
-sudo systemctl enable mykey-proxy-daemon
+sudo systemctl enable mykey-daemon
 ok "Daemon service enabled."
 
-# ── 4.12 Build systray ────────────────────────────────────────────────────
+# ── 4.12 Build mykey-tray ────────────────────────────────────────────────────
 echo ""
 info "Building ${TRAY_BINARY} (release)..."
-cd "${REPO_ROOT}/systray"
+cd "${REPO_ROOT}/mykey-tray"
 RUSTFLAGS="-A warnings" "${CARGO}" build --release
 ok "Build complete: ${TRAY_BINARY}"
 
-# ── 4.13 Install systray binary ───────────────────────────────────────────
-sudo install -m 0755 "${REPO_ROOT}/systray/target/release/${TRAY_BINARY}" "${TRAY_DEST}"
+# ── 4.13 Install mykey-tray binary ───────────────────────────────────────────
+sudo install -m 0755 "${REPO_ROOT}/mykey-tray/target/release/${TRAY_BINARY}" "${TRAY_DEST}"
 ok "${TRAY_DEST}"
 
 # ── 4.14 Install tray user service (as the real user, not root) ───────────
@@ -691,17 +691,17 @@ SYSTEMD_USER_DIR="${REAL_HOME}/.config/systemd/user"
 
 mkdir -p "${SYSTEMD_USER_DIR}"
 
-cp "${TRAY_SERVICE_SRC}" "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
-chmod 0644 "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service"
+cp "${TRAY_SERVICE_SRC}" "${SYSTEMD_USER_DIR}/mykey-tray.service"
+chmod 0644 "${SYSTEMD_USER_DIR}/mykey-tray.service"
 
 systemctl --user daemon-reload
-systemctl --user enable --now mykey-proxy-tray
+systemctl --user enable --now mykey-tray
 
 # Symlink fallback to guarantee enable persists
 AUTOSTART_DIR="${SYSTEMD_USER_DIR}/default.target.wants"
 mkdir -p "${AUTOSTART_DIR}"
-ln -sf "${SYSTEMD_USER_DIR}/mykey-proxy-tray.service" \
-       "${AUTOSTART_DIR}/mykey-proxy-tray.service"
+ln -sf "${SYSTEMD_USER_DIR}/mykey-tray.service" \
+       "${AUTOSTART_DIR}/mykey-tray.service"
 
 ok "Tray service installed and enabled for user '${REAL_USER}'"
 
@@ -806,25 +806,25 @@ echo " Phase 6 — Start Services"
 echo "════════════════════════════════════════════════════════════"
 
 echo ""
-info "Starting mykey-proxy-daemon..."
-sudo systemctl start mykey-proxy-daemon
+info "Starting mykey-daemon..."
+sudo systemctl start mykey-daemon
 sleep 2
-if systemctl is-active --quiet mykey-proxy-daemon; then
-    ok "mykey-proxy-daemon is running"
+if systemctl is-active --quiet mykey-daemon; then
+    ok "mykey-daemon is running"
 else
-    fail "mykey-proxy-daemon failed to start"
-    fail "Check: journalctl -u mykey-proxy-daemon -n 20"
+    fail "mykey-daemon failed to start"
+    fail "Check: journalctl -u mykey-daemon -n 20"
     FAILED=1
 fi
 
-info "Starting mykey-proxy-tray..."
-systemctl --user start mykey-proxy-tray 2>/dev/null || true
+info "Starting mykey-tray..."
+systemctl --user start mykey-tray 2>/dev/null || true
 sleep 1
-if systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
-    ok "mykey-proxy-tray is running"
+if systemctl --user is-active --quiet mykey-tray 2>/dev/null; then
+    ok "mykey-tray is running"
 else
-    warn "mykey-proxy-tray did not start — you can start it manually:"
-    warn "systemctl --user start mykey-proxy-tray"
+    warn "mykey-tray did not start — you can start it manually:"
+    warn "systemctl --user start mykey-tray"
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -906,7 +906,7 @@ read -rp "  Press Enter when you are ready to continue..."
 # Step 1 — Open browser to extensions page
 echo ""
 info "Step 1: Open your browser to chrome://extensions"
-info "Enable Developer Mode, then click 'Load unpacked' and select: ${REPO_ROOT}/extension"
+info "Enable Developer Mode, then click 'Load unpacked' and select: ${REPO_ROOT}/mykey-proxy/chromium"
 echo ""
 if [[ -n "${SELECTED_BINARY:-}" ]]; then
     info "Opening ${SELECTED_BROWSER} now..."
@@ -930,7 +930,7 @@ echo "  Click the 'Load unpacked' button that appeared after enabling"
 echo "  Developer Mode."
 echo ""
 echo "  When the folder picker opens, navigate to:"
-echo "      ${REPO_ROOT}/extension"
+echo "      ${REPO_ROOT}/mykey-proxy/chromium"
 echo ""
 read -rp "  Press Enter once you have selected the extension folder..."
 
@@ -960,10 +960,10 @@ done
 # Apply extension ID to all manifest files
 UPDATED=0
 for f in \
-    "${CHROME_NMH_DIR}/com.mykeyproxy.host.json" \
-    "${CHROMIUM_NMH_DIR}/com.mykeyproxy.host.json" \
-    "${REAL_HOME}/.config/google-chrome/NativeMessagingHosts/com.mykeyproxy.host.json" \
-    "${REAL_HOME}/.config/chromium/NativeMessagingHosts/com.mykeyproxy.host.json"
+    "${CHROME_NMH_DIR}/com.mykey.host.json" \
+    "${CHROMIUM_NMH_DIR}/com.mykey.host.json" \
+    "${REAL_HOME}/.config/google-chrome/NativeMessagingHosts/com.mykey.host.json" \
+    "${REAL_HOME}/.config/chromium/NativeMessagingHosts/com.mykey.host.json"
 do
     if [[ -f "${f}" ]]; then
         sudo sed -i "s|EXTENSION_ID_PLACEHOLDER|${EXTENSION_ID}|g" "${f}"
@@ -1027,7 +1027,7 @@ echo "[4/8] Configuration..."
 for f in \
     "${TRUSTED_HASHES}" \
     "${POLKIT_POLICY}" \
-    "/etc/dbus-1/system.d/com.mykeyproxy.Daemon.conf"
+    "/etc/dbus-1/system.d/com.mykey.Daemon.conf"
 do
     if sudo test -f "${f}"; then
         ok "${f}"
@@ -1041,8 +1041,8 @@ done
 echo "[5/8] Extension ID..."
 ID_SET=0
 for f in \
-    "${CHROME_NMH_DIR}/com.mykeyproxy.host.json" \
-    "${CHROMIUM_NMH_DIR}/com.mykeyproxy.host.json"
+    "${CHROME_NMH_DIR}/com.mykey.host.json" \
+    "${CHROMIUM_NMH_DIR}/com.mykey.host.json"
 do
     if [[ -f "${f}" ]] && ! grep -q "EXTENSION_ID_PLACEHOLDER" "${f}"; then
         ok "Extension ID configured in ${f}"
@@ -1060,7 +1060,7 @@ if command -v python3 &>/dev/null; then
     sudo python3 - << 'PYEOF'
 import json, hashlib, sys
 try:
-    with open("/etc/mykey-proxy/trusted-binaries.json") as f:
+    with open("/etc/mykey/trusted-binaries.json") as f:
         entries = json.load(f)
     all_ok = True
     for entry in entries:
@@ -1083,20 +1083,20 @@ fi
 
 # [7/8] Daemon service
 echo "[7/8] Daemon service..."
-if systemctl is-active --quiet mykey-proxy-daemon; then
-    ok "mykey-proxy-daemon is running"
+if systemctl is-active --quiet mykey-daemon; then
+    ok "mykey-daemon is running"
 else
-    fail "mykey-proxy-daemon is not running"
+    fail "mykey-daemon is not running"
     FAILED=1
 fi
 
 # [8/8] Tray service
 echo "[8/8] Tray service..."
-if systemctl --user is-active --quiet mykey-proxy-tray 2>/dev/null; then
-    ok "mykey-proxy-tray is running"
+if systemctl --user is-active --quiet mykey-tray 2>/dev/null; then
+    ok "mykey-tray is running"
 else
-    warn "mykey-proxy-tray is not running"
-    warn "Start with: systemctl --user start mykey-proxy-tray"
+    warn "mykey-tray is not running"
+    warn "Start with: systemctl --user start mykey-tray"
 fi
 
 # ── Final summary ─────────────────────────────────────────────────────────
@@ -1112,8 +1112,8 @@ if [[ "${FAILED}" -eq 0 ]]; then
     echo "   4. Complete registration then test Sign In"
     echo ""
     echo " Live logs:"
-    echo "   journalctl -u mykey-proxy-daemon -f"
-    echo "   tail -f /tmp/mykey-proxy-host.log"
+    echo "   journalctl -u mykey-daemon -f"
+    echo "   tail -f /tmp/mykey-host.log"
 else
     echo " Installation completed with errors — review the output above."
     echo " Fix any failed checks and run ./scripts/install.sh again."

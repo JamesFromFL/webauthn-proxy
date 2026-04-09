@@ -1,11 +1,11 @@
 [Unit]
-Description=MyKey Proxy System Tray
-After=graphical-session.target mykey-proxy-daemon.service
-Wants=mykey-proxy-daemon.service
+Description=MyKey System Tray
+After=graphical-session.target mykey-daemon.service
+Wants=mykey-daemon.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mykey-proxy-tray
+ExecStart=/usr/local/bin/mykey-tray
 Restart=on-failure
 RestartSec=3s
 Environment=DISPLAY=:0
