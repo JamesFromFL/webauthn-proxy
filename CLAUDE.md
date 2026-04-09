@@ -2,24 +2,27 @@
 
 ## Project context
 
-mykey-proxy is a local-first WebAuthn proxy for Linux. It intercepts browser passkey requests, enforces PAM user presence, and seals credential keys to the machine's TPM2 chip via PCR binding.
+MyKey is a hardware-backed authentication and secret management platform for Linux. It provides WebAuthn platform authenticator support, TPM2-sealed credential storage, biometric management, encrypted secret storage via the Secret Service API, and a GTK4 credential manager — all backed by TPM2 and enforced Secure Boot.
 
-The repo has two main runtime components:
+MyKey is composed of the following components:
 
-- **`extension/`** — A Chrome/Chromium browser extension (Manifest V3, JavaScript).
-- **`native-host/`** — A native messaging host binary (Rust) that handles PAM and TPM2 operations.
-
-Supporting directories:
-
-- **`assets/`** — Project logos and static assets.
-- **`docs/`** — Additional documentation beyond the top-level markdown files.
-- **`scripts/`** — Install and setup shell scripts.
+- **`mykey-proxy/chromium/`** — Chrome/Chromium browser extension (MV3, JavaScript)
+- **`mykey-proxy/firefox/`** — Firefox extension (planned)
+- **`mykey-host/`** — Native messaging host (Rust) bridging the browser to the daemon
+- **`mykey-daemon/`** — Persistent D-Bus system service handling PAM, TPM2, and crypto
+- **`mykey-tray/`** — System tray indicator (Rust, ksni)
+- **`mykey-manager/`** — GTK4 credential management GUI (Rust)
+- **`scripts/`** — Installer, uninstaller, systemd units, D-Bus policy, polkit policy
+- **`assets/`** — Logos and icons
+- **`docs/`** — Documentation (in progress)
 
 ---
 
 ## Coding conventions
 
-### Native host (Rust)
+### Rust components
+
+These conventions apply to all four Rust crates: `mykey-host`, `mykey-daemon`, `mykey-tray`, and `mykey-manager`.
 
 - Use the 2021 edition.
 - Prefer `thiserror` for error types; avoid `Box<dyn Error>` in library code.
@@ -30,6 +33,8 @@ Supporting directories:
 - Run `cargo clippy -- -D warnings` before committing.
 
 ### Extension (JavaScript / Manifest V3)
+
+Applies to `mykey-proxy/chromium/` (and `mykey-proxy/firefox/` when implemented).
 
 - No build step unless genuinely required — keep it plain ES modules.
 - Use the `webAuthenticationProxy` API exclusively; do not monkey-patch `navigator.credentials`.
@@ -62,6 +67,6 @@ Supporting directories:
 
 ## Testing
 
-- Native host: use `cargo test` with integration tests that mock the PAM and TPM2 surfaces via trait objects — never call real PAM or TPM in CI.
+- All Rust components (`mykey-host`, `mykey-daemon`, `mykey-tray`, `mykey-manager`): use `cargo test` with integration tests that mock the PAM and TPM2 surfaces via trait objects — never call real PAM or TPM in CI.
 - Extension: unit tests via a minimal test harness; no browser automation required for unit tests.
 - A real end-to-end test (actual TPM + PAM) lives in `scripts/e2e-test.sh` and is only run manually on hardware.
