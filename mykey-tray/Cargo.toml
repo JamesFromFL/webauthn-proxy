@@ -1,12 +1,12 @@
 [package]
-name = "mykey-proxy-tray"
+name = "mykey-tray"
 version = "0.1.0"
 edition = "2021"
-description = "System tray indicator for MyKey Proxy"
+description = "System tray indicator for MyKey"
 license = "MIT"
 
 [[bin]]
-name = "mykey-proxy-tray"
+name = "mykey-tray"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,4 +1,4 @@
-// tray.rs — ksni::Tray implementation for MyKey Proxy.
+// tray.rs — ksni::Tray implementation for MyKey.
 
 use ksni::{menu, Icon, Tray};
 
@@ -19,7 +19,7 @@ impl WebAuthnTray {
 
 impl Tray for WebAuthnTray {
     fn id(&self) -> String {
-        "mykey-proxy".into()
+        "mykey-tray".into()
     }
 
     fn title(&self) -> String {

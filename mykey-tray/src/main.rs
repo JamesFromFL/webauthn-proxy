@@ -1,4 +1,4 @@
-// main.rs — MyKey Proxy system tray application entry point.
+// main.rs — MyKey system tray application entry point.
 
 mod tray;
 
@@ -8,8 +8,8 @@ fn setup_logger() {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/mykey-proxy-tray.log")
-        .expect("Failed to open /tmp/mykey-proxy-tray.log");
+        .open("/tmp/mykey-tray.log")
+        .expect("Failed to open /tmp/mykey-tray.log");
 
     env_logger::Builder::new()
         .target(env_logger::Target::Pipe(Box::new(log_file)))
@@ -21,7 +21,7 @@ fn setup_logger() {
 fn main() {
     setup_logger();
     info!(
-        "mykey-proxy-tray started (pid={}, version={})",
+        "mykey-tray started (pid={}, version={})",
         std::process::id(),
         env!("CARGO_PKG_VERSION")
     );

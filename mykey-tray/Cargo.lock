@@ -427,7 +427,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mykey-proxy-tray"
+name = "mykey-tray"
 version = "0.1.0"
 dependencies = [
  "env_logger",
