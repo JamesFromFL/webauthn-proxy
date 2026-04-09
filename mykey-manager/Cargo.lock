@@ -541,7 +541,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mykey-proxy-manager"
+name = "mykey-manager"
 version = "0.1.0"
 dependencies = [
  "env_logger",

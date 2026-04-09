@@ -1,11 +1,11 @@
-// main.rs — MyKey Proxy Manager: GTK4 credential management GUI.
+// main.rs — MyKey Manager: GTK4 credential management GUI.
 
 mod ui;
 
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, CssProvider, Notebook};
 
-const APP_ID: &str = "com.mykeyproxy.Manager";
+const APP_ID: &str = "com.mykey.Manager";
 
 fn main() {
     env_logger::init();
@@ -46,7 +46,7 @@ fn build_ui(app: &Application) {
     // ── Window ────────────────────────────────────────────────────────────────
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("MyKey Proxy — Credential Manager")
+        .title("MyKey Manager")
         .default_width(900)
         .default_height(600)
         .child(&notebook)

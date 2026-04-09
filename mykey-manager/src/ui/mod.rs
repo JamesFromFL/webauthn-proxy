@@ -1,4 +1,4 @@
-// mod.rs — UI module re-exports for MyKey Proxy Manager tabs.
+// mod.rs — UI module re-exports for MyKey Manager tabs.
 
 pub mod biometrics;
 pub mod credentials;
