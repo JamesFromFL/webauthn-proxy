@@ -1,12 +1,12 @@
 [package]
-name = "mykey-proxy-daemon"
+name = "mykey-daemon"
 version = "0.1.0"
 edition = "2021"
-description = "Persistent D-Bus service for MyKey Proxy — PAM + TPM2 on Linux"
+description = "Persistent D-Bus service for MyKey — PAM + TPM2 on Linux"
 license = "MIT"
 
 [[bin]]
-name = "mykey-proxy-daemon"
+name = "mykey-daemon"
 path = "src/main.rs"
 
 [dependencies]

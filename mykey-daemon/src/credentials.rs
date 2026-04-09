@@ -1,7 +1,7 @@
 // credentials.rs — On-disk credential metadata I/O.
 //
 // Credential metadata JSON files live at:
-//   /etc/mykey-proxy/credentials/{credential_id_hex}.json
+//   /etc/mykey/credentials/{credential_id_hex}.json
 //
 // No key material is stored here; private keys live in tpm.rs.
 
@@ -10,7 +10,7 @@ use log::debug;
 
 use crate::protocol::{AllowCredential, CredentialMeta, GetRequest};
 
-const CRED_DIR: &str = "/etc/mykey-proxy/credentials";
+const CRED_DIR: &str = "/etc/mykey/credentials";
 
 // ---------------------------------------------------------------------------
 // Write

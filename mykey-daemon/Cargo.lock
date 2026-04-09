@@ -937,7 +937,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mykey-proxy-daemon"
+name = "mykey-daemon"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",

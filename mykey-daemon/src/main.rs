@@ -4,7 +4,7 @@
 //   1. Initialise file logger (never stdout/stderr in production)
 //   2. Enforce prerequisites (Secure Boot, TPM2, binary integrity)
 //   3. Build shared daemon state (session store, replay cache)
-//   4. Register D-Bus service "com.mykeyproxy.Daemon" on the system bus
+//   4. Register D-Bus service "com.mykey.Daemon" on the system bus
 //   5. Run the tokio event loop indefinitely
 
 use std::sync::Arc;
@@ -34,8 +34,8 @@ fn setup_logger() {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/mykey-proxy-daemon.log")
-        .expect("Failed to open /tmp/mykey-proxy-daemon.log");
+        .open("/tmp/mykey-daemon.log")
+        .expect("Failed to open /tmp/mykey-daemon.log");
 
     env_logger::Builder::new()
         .target(env_logger::Target::Pipe(Box::new(log_file)))
@@ -53,7 +53,7 @@ async fn main() {
     setup_logger();
 
     info!(
-        "mykey-proxy-daemon starting (pid={}, version={})",
+        "mykey-daemon starting (pid={}, version={})",
         std::process::id(),
         env!("CARGO_PKG_VERSION")
     );
@@ -61,7 +61,7 @@ async fn main() {
     // ── Prerequisites ─────────────────────────────────────────────────────
     if let Err(e) = prereqs::enforce_prereqs() {
         error!("Prerequisites check failed: {}", e);
-        eprintln!("[mykey-proxy-daemon] Prerequisites check failed: {e}");
+        eprintln!("[mykey-daemon] Prerequisites check failed: {e}");
         std::process::exit(1);
     }
 
@@ -72,26 +72,26 @@ async fn main() {
     let interface = DaemonInterface::new(Arc::clone(&state));
 
     let conn = match zbus::connection::Builder::system()
-        .and_then(|b| b.name("com.mykeyproxy.Daemon"))
-        .and_then(|b| b.serve_at("/com/mykeyproxy/Daemon", interface))
+        .and_then(|b| b.name("com.mykey.Daemon"))
+        .and_then(|b| b.serve_at("/com/mykey/Daemon", interface))
     {
         Ok(builder) => match builder.build().await {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to build D-Bus connection: {}", e);
-                eprintln!("[mykey-proxy-daemon] D-Bus connection failed: {e}");
+                eprintln!("[mykey-daemon] D-Bus connection failed: {e}");
                 std::process::exit(1);
             }
         },
         Err(e) => {
             error!("Failed to configure D-Bus builder: {}", e);
-            eprintln!("[mykey-proxy-daemon] D-Bus builder failed: {e}");
+            eprintln!("[mykey-daemon] D-Bus builder failed: {e}");
             std::process::exit(1);
         }
     };
 
     info!(
-        "D-Bus service registered: name='com.mykeyproxy.Daemon' path='/com/mykeyproxy/Daemon'"
+        "D-Bus service registered: name='com.mykey.Daemon' path='/com/mykey/Daemon'"
     );
 
     // Keep the connection alive.  The daemon exits only on signal or fatal error.
