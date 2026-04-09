@@ -551,12 +551,16 @@ echo "════════════════════════�
 HOST_BINARY="mykey-host"
 DAEMON_BINARY="mykey-daemon"
 TRAY_BINARY="mykey-tray"
+SECRETS_BINARY="mykey-secrets"
 HOST_DEST="/usr/local/bin/${HOST_BINARY}"
 DAEMON_DEST="/usr/local/bin/${DAEMON_BINARY}"
 TRAY_DEST="/usr/local/bin/${TRAY_BINARY}"
+SECRETS_DEST="/usr/local/bin/${SECRETS_BINARY}"
 HOST_MANIFEST_SRC="${REPO_ROOT}/scripts/com.mykey.host.json"
 SYSTEMD_UNIT_SRC="${REPO_ROOT}/scripts/mykey-daemon.service"
 TRAY_SERVICE_SRC="${REPO_ROOT}/scripts/mykey-tray.service"
+SECRETS_SERVICE_SRC="${REPO_ROOT}/scripts/mykey-secrets.service"
+SECRETS_DBUS_CONF_SRC="${REPO_ROOT}/scripts/org.freedesktop.secrets.conf"
 WEBAUTHN_DIR="/etc/mykey"
 CREDENTIAL_DIR="${WEBAUTHN_DIR}/credentials"
 KEY_DIR="${WEBAUTHN_DIR}/keys"
@@ -704,6 +708,33 @@ ln -sf "${SYSTEMD_USER_DIR}/mykey-tray.service" \
        "${AUTOSTART_DIR}/mykey-tray.service"
 
 ok "Tray service installed and enabled for user '${REAL_USER}'"
+
+# ── 4.15 Build mykey-secrets ─────────────────────────────────────────────────
+echo ""
+info "Building ${SECRETS_BINARY} (release)..."
+cd "${REPO_ROOT}/mykey-secrets"
+RUSTFLAGS="-A warnings" "${CARGO}" build --release
+ok "Build complete: ${SECRETS_BINARY}"
+
+# ── 4.16 Install mykey-secrets binary ────────────────────────────────────────
+sudo install -m 0755 "${REPO_ROOT}/mykey-secrets/target/release/${SECRETS_BINARY}" "${SECRETS_DEST}"
+ok "${SECRETS_DEST}"
+
+# ── 4.17 Install Secret Service D-Bus session policy ─────────────────────────
+echo ""
+info "Installing Secret Service D-Bus policy..."
+sudo install -m 0644 "${SECRETS_DBUS_CONF_SRC}" \
+    /etc/dbus-1/session.d/org.freedesktop.secrets.conf
+ok "/etc/dbus-1/session.d/org.freedesktop.secrets.conf"
+
+# ── 4.18 Install and enable mykey-secrets systemd service ────────────────────
+echo ""
+info "Installing mykey-secrets systemd service..."
+sudo install -m 0644 "${SECRETS_SERVICE_SRC}" \
+    /etc/systemd/system/mykey-secrets.service
+sudo systemctl daemon-reload
+sudo systemctl enable mykey-secrets
+ok "mykey-secrets service enabled."
 
 # ════════════════════════════════════════════════════════════════════════════
 # PHASE 5 — SIGN BINARIES WITH SECURE BOOT KEYS

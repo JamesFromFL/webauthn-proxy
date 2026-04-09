@@ -20,6 +20,8 @@ REAL_XDG_RUNTIME="/run/user/${REAL_USER_ID}"
 REAL_DBUS="unix:path=${REAL_XDG_RUNTIME}/bus"
 
 echo "==> Stopping services..."
+systemctl stop mykey-secrets 2>/dev/null || true
+systemctl disable mykey-secrets 2>/dev/null || true
 systemctl stop mykey-daemon 2>/dev/null || true
 systemctl disable mykey-daemon 2>/dev/null || true
 
@@ -37,8 +39,10 @@ echo "==> Removing binaries..."
 rm -f /usr/local/bin/mykey-host
 rm -f /usr/local/bin/mykey-daemon
 rm -f /usr/local/bin/mykey-tray
+rm -f /usr/local/bin/mykey-secrets
 
 echo "==> Removing systemd units..."
+rm -f /etc/systemd/system/mykey-secrets.service
 rm -f /etc/systemd/system/mykey-daemon.service
 rm -f "${REAL_USER_HOME}/.config/systemd/user/mykey-tray.service"
 rm -f "${REAL_USER_HOME}/.config/systemd/user/default.target.wants/mykey-tray.service"
@@ -52,6 +56,7 @@ sudo -u "${REAL_USER}" \
 
 echo "==> Removing D-Bus policy..."
 rm -f /etc/dbus-1/system.d/com.mykey.Daemon.conf
+rm -f /etc/dbus-1/session.d/org.freedesktop.secrets.conf
 
 echo "==> Removing sudoers rule..."
 rm -f /etc/sudoers.d/mykey
