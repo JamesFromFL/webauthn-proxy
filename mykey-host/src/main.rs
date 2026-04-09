@@ -26,8 +26,8 @@ fn setup_logger() {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/mykey-proxy-host.log")
-        .expect("Failed to open /tmp/mykey-proxy-host.log");
+        .open("/tmp/mykey-host.log")
+        .expect("Failed to open /tmp/mykey-host.log");
 
     env_logger::Builder::new()
         .target(env_logger::Target::Pipe(Box::new(log_file)))
@@ -152,7 +152,7 @@ fn wrap_ok<T: serde::Serialize>(request_id: &str, payload: T) -> Vec<u8> {
 fn main() {
     setup_logger();
     info!(
-        "mykey-proxy-host started (pid={}, version={})",
+        "mykey-host started (pid={}, version={})",
         std::process::id(),
         env!("CARGO_PKG_VERSION")
     );
@@ -195,5 +195,5 @@ fn main() {
     }
 
     let _ = session.client.disconnect(std::process::id());
-    info!("mykey-proxy-host exiting");
+    info!("mykey-host exiting");
 }

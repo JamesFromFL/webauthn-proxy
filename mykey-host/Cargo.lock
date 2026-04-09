@@ -928,7 +928,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mykey-proxy-host"
+name = "mykey-host"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",

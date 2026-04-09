@@ -20,7 +20,7 @@
 //
 // Current state — SOFTWARE FALLBACK (not production safe):
 //
-//   Private key bytes are stored as a hex file under /etc/mykey-proxy/keys/.
+//   Private key bytes are stored as a hex file under /etc/mykey/keys/.
 //   This is provided solely to make the end-to-end registration/authentication
 //   flow testable without TPM2 hardware.
 //
@@ -32,7 +32,7 @@ use log::warn;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-const KEY_DIR: &str = "/etc/mykey-proxy/keys";
+const KEY_DIR: &str = "/etc/mykey/keys";
 
 // ---------------------------------------------------------------------------
 // Software fallback
