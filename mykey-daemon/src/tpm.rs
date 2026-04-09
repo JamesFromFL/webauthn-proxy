@@ -143,6 +143,73 @@ fn fallback_path(credential_id_hex: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// Blob API — seal/unseal raw bytes without credential-ID disk storage
+// ---------------------------------------------------------------------------
+
+/// Seal raw `data` bytes via the TPM2 and return the sealed blob as bytes.
+///
+/// The blob is a JSON object encoding the TPM2B_PUBLIC and TPM2B_PRIVATE of
+/// the sealed data object.  Pass the returned bytes directly to `unseal_blob`
+/// to recover the original data.  Nothing is written to disk.
+///
+/// ⚠ SOFTWARE FALLBACK — returns hex-encoded plaintext when the `tpm2`
+/// feature is absent.  Not production safe.
+#[cfg(feature = "tpm2")]
+pub fn seal_blob(data: &[u8]) -> Result<Vec<u8>, String> {
+    use tpm2_impl::tpm_seal;
+    let (pub_bytes, priv_bytes) = tpm_seal(data)?;
+    serde_json::to_vec(&serde_json::json!({
+        "public":  hex::encode(&pub_bytes),
+        "private": hex::encode(&priv_bytes),
+    }))
+    .map_err(|e| format!("JSON serialization error: {e}"))
+}
+
+#[cfg(not(feature = "tpm2"))]
+pub fn seal_blob(data: &[u8]) -> Result<Vec<u8>, String> {
+    warn!(
+        "⚠ SOFTWARE FALLBACK (daemon): seal_blob storing {} bytes as plaintext hex. \
+         Enable --features tpm2 for real TPM sealing.",
+        data.len()
+    );
+    Ok(hex::encode(data).into_bytes())
+}
+
+/// Unseal bytes from a blob produced by `seal_blob`.
+///
+/// Fails if PCR 0 or PCR 7 have changed since the blob was sealed —
+/// indicating firmware or Secure Boot configuration tampering.
+///
+/// ⚠ SOFTWARE FALLBACK — hex-decodes plaintext when the `tpm2` feature is
+/// absent.
+#[cfg(feature = "tpm2")]
+pub fn unseal_blob(blob: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+    use tpm2_impl::tpm_unseal;
+    let json: serde_json::Value = serde_json::from_slice(blob)
+        .map_err(|e| format!("Invalid blob JSON: {e}"))?;
+    let pub_bytes = hex::decode(
+        json["public"].as_str().ok_or("Missing 'public' field in blob")?,
+    )
+    .map_err(|e| format!("Invalid hex in 'public': {e}"))?;
+    let priv_bytes = hex::decode(
+        json["private"].as_str().ok_or("Missing 'private' field in blob")?,
+    )
+    .map_err(|e| format!("Invalid hex in 'private': {e}"))?;
+    tpm_unseal(&pub_bytes, &priv_bytes)
+}
+
+#[cfg(not(feature = "tpm2"))]
+pub fn unseal_blob(blob: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+    warn!("⚠ SOFTWARE FALLBACK (daemon): unseal_blob decoding plaintext hex.");
+    let hex_str = std::str::from_utf8(blob)
+        .map_err(|_| "Blob is not valid UTF-8".to_string())?
+        .trim();
+    let data = hex::decode(hex_str)
+        .map_err(|e| format!("Invalid hex in blob: {e}"))?;
+    Ok(Zeroizing::new(data))
+}
+
+// ---------------------------------------------------------------------------
 // TPM2 internals — compiled only with --features tpm2
 // ---------------------------------------------------------------------------
 

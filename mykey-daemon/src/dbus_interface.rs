@@ -7,6 +7,8 @@
 //   Connect(pid)                      → session token bytes (Vec<u8>)
 //   Register(pid, encrypted_request)  → encrypted response (JSON)
 //   Authenticate(pid, encrypted_request) → encrypted response (JSON)
+//   SealSecret(pid, data)             → sealed blob bytes (Vec<u8>)
+//   UnsealSecret(pid, blob)           → plaintext bytes (Vec<u8>)
 //   Disconnect(pid)                   → ()
 //
 // The native host supplies its own PID.  In production the daemon should
@@ -23,6 +25,7 @@ use crate::protocol::{CreateRequest, GetRequest};
 use crate::registration;
 use crate::replay::AsyncReplayCache;
 use crate::session::SessionStore;
+use crate::tpm;
 use crate::validator;
 
 // ---------------------------------------------------------------------------
@@ -203,6 +206,52 @@ impl DaemonInterface {
         self.encrypt_with_session(pid, &response_bytes)
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e))
+    }
+
+    // ── SealSecret ───────────────────────────────────────────────────────────
+    /// Seal arbitrary bytes via the TPM2 (or software fallback) and return the
+    /// sealed blob.
+    ///
+    /// The caller must have an active session established via Connect.  The
+    /// daemon logs byte counts only — never the data content.
+    async fn seal_secret(&self, pid: u32, data: Vec<u8>) -> Result<Vec<u8>, zbus::fdo::Error> {
+        info!("[dbus] SealSecret called from pid={pid} ({} bytes)", data.len());
+
+        if self.state.sessions.with_token(pid, |_| ()).await.is_none() {
+            warn!("[dbus] SealSecret rejected: no session for pid={pid}");
+            return Err(zbus::fdo::Error::AccessDenied(
+                format!("No session for pid={pid} — call Connect first"),
+            ));
+        }
+
+        let blob = tpm::seal_blob(&data)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("SealSecret failed: {e}")))?;
+
+        info!("[dbus] SealSecret complete for pid={pid} (blob {} bytes)", blob.len());
+        Ok(blob)
+    }
+
+    // ── UnsealSecret ─────────────────────────────────────────────────────────
+    /// Unseal a blob previously produced by SealSecret.
+    ///
+    /// The caller must have an active session.  Fails if PCR values have
+    /// changed since sealing.  The daemon logs byte counts only — never the
+    /// plaintext content.
+    async fn unseal_secret(&self, pid: u32, blob: Vec<u8>) -> Result<Vec<u8>, zbus::fdo::Error> {
+        info!("[dbus] UnsealSecret called from pid={pid} ({} bytes)", blob.len());
+
+        if self.state.sessions.with_token(pid, |_| ()).await.is_none() {
+            warn!("[dbus] UnsealSecret rejected: no session for pid={pid}");
+            return Err(zbus::fdo::Error::AccessDenied(
+                format!("No session for pid={pid} — call Connect first"),
+            ));
+        }
+
+        let plaintext = tpm::unseal_blob(&blob)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("UnsealSecret failed: {e}")))?;
+
+        info!("[dbus] UnsealSecret complete for pid={pid} ({} bytes)", plaintext.len());
+        Ok(plaintext.to_vec())
     }
 
     // ── Disconnect ────────────────────────────────────────────────────────────
