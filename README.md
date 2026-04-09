@@ -1,5 +1,5 @@
 # MyKey
-![MyKey](assets/mykey-logo-stylized.png)
+![MyKey](assets/mykey-logo-stylized-medium.png)
 
 MyKey is a hardware-backed authentication and secret management platform for Linux.
 
