@@ -1,165 +1,221 @@
-# MyKey Proxy
-![MyKey Proxy](assets/AuthnProxyLogoStylized.png)
+# MyKey
+![MyKey](assets/mykey-logo-stylized.png)
 
-Designed around open standards and native Linux security components, MyKey Proxy enables secure, passwordless authentication across your system, browser, and applications.
+MyKey is a hardware-backed authentication and secret management platform for Linux.
+
+Built on TPM2, Secure Boot, and native Linux security components, MyKey brings together passwordless authentication, encrypted secret storage, biometrics, and browser integration into a single, simple experience.
 
 **Secure by design. Simple by default. Built for Linux.**
 
-## Features
+---
+
+## ✨ Features
 
 - 🔐 TPM2-backed credential storage  
-- 👆 Biometric authentication (fingerprint / face unlock)  
 - 🧠 Encrypted secret management  
-- 🌐 WebAuthn platform authenticator for Chromium and Firefox  
-- 📁 Secure file management with encrypted storage  
-- 🛡️ Simplified Secure Boot setup  
+- 🗝️ Secret Service API provider (replacement for KWallet / gnome-keyring)  
+- 👆 Biometric authentication (fingerprint / face unlock)  
+- 🌐 WebAuthn support for Chromium and Firefox  
+- 📁 Secure file storage (encrypted folders)  
+- 🛡️ Guided Secure Boot setup  
 
-## Why MyKey Proxy?
+---
 
-Linux has powerful security primitives—but they’re often fragmented and difficult to use.
+## 🧩 Components
 
-MyKey Proxy unifies them into a single, user-friendly experience:
+MyKey is made up of several components that work together:
+
+- ⚙️ **Daemon (mykey-daemon)**  
+  Core background service handling authentication, TPM interaction, and security logic  
+
+- 🎛️ **GUI Manager (mykey-manager)**  
+  Desktop app for managing credentials, secrets, biometrics, and system security  
+
+- 🖥️ **System Tray (mykey-tray)**  
+  System tray interface for status and quick actions  
+
+- 🗝️ **Secret Service API (mykey-secrets)**  
+  Secret Service API provider — a hardware-backed, desktop-agnostic replacement for KWallet and gnome-keyring  
+
+- 🔌 **Native Host (mykey-host)**  
+  Native messaging bridge between the browser and the system  
+
+- 🌐 **Browser Extension (mykey-proxy)**  
+  Browser extension that enables WebAuthn authentication on Linux  
+
+- 📦 **Distribution**  
+  Planned for AUR (Arch Linux) with potential Flatpak support later  
+
+---
+
+## 🤔 Why MyKey?
+
+Linux has powerful security tools — but they’re often fragmented, inconsistent, or difficult to use.
+
+MyKey brings them together into one system:
+
 - No passwords to remember  
-- No scattered authentication tools  
-- Just fast, secure access to your system and services
+- No juggling multiple tools  
+- No guessing how your system is secured  
 
-> Windows Hello–style authentication for Linux, built on TPM, biometrics, and open standards.
+Just fast, secure authentication and encrypted storage — built directly on your system.
 
-## How It Works
+> Windows Hello–style authentication for Linux, built on open standards and real hardware security.
 
-MyKey Proxy acts as a unified authentication layer for Linux, bridging hardware security, biometrics, and system services into a single, seamless experience.
+---
 
-When authentication is required—whether unlocking your system, accessing encrypted data, or approving a login—MyKey Proxy coordinates the process through a local background service:
+## ⚙️ How It Works
 
-1. **User Presence Verification**  
-   You confirm your identity using biometrics (fingerprint/face) or your system credentials.
-2. **Hardware-Backed Validation**  
-   The request is securely processed using TPM2-backed keys, ensuring credentials never leave your machine.
-3. **Secure Authorization**  
-   The system signs or unlocks the requested resource (application, browser, or service) without exposing sensitive data.
+When authentication or secure data access is needed, MyKey handles everything locally:
 
-All operations happen locally, leveraging Linux-native security components—no passwords transmitted, no external dependency on cloud authentication.
+1. 👆 **You verify your identity**  
+   Using biometrics or your system credentials  
+
+2. 🔐 **Your system validates securely**  
+   TPM2 ensures keys never leave your machine  
+
+3. ✅ **Access is granted safely**  
+   Whether it's logging in, unlocking data, or approving a request  
+
+Everything happens on your machine:
+- No cloud dependency  
+- No passwords sent over the network  
+- No hidden background services  
 
 **One system. One identity. Fully under your control.**
 
-## System Requirements
+---
 
-MyKey Proxy requires a modern Linux system with hardware-backed security features enabled.
+## 🖥️ Supported Platform
 
-### Required
+MyKey is designed for a **specific, security-focused Linux environment**.
 
-- 🧩 Linux system with `systemd`, `D-Bus`, `PAM`, and `polkit`
-- 🔐 TPM 2.0 enabled and accessible  
-- 🛡️ Secure Boot enabled  
-- 🌐 Chromium or Firefox-based browser  
+### 🔐 Required Hardware
 
-> ⚠️ Systems without TPM 2.0 and Secure Boot are not supported.
+- TPM 2.0  
+- UEFI firmware  
+- Secure Boot enabled  
 
-## What's Inside
+### ⚙️ Required System Stack
 
-MyKey Proxy is composed of several components that work together to provide a seamless authentication experience on Linux:
+- systemd  
+- systemd-boot  
+- sbctl  
+- UKI (Unified Kernel Image)  
+- PAM  
+- D-Bus  
+- polkit  
+- `/boot/EFI/` partition layout  
 
-- 🌐 **Browser Extension**  
-  Integrates with Chromium and Firefox-based browsers to route authentication requests into MyKey Proxy.
-- 🔌 **Native Host**  
-  Acts as the bridge between the browser and the local system, translating authentication requests into secure system calls.
-- ⚙️ **Daemon**  
-  A background service responsible for authentication logic, TPM interactions, credential protection, and cryptographic operations.
-- 🖥️ **System Tray**  
-  Provides a lightweight interface for status, quick actions, and visibility into the running service.
-- 🎛️ **GUI Manager (mykey-proxy-manager)** 
-  A full desktop interface for managing credentials, biometrics, secure storage, and system security configuration.
-- 📦 **Distribution**  
-  Planned for AUR (Arch Linux) with potential future support for Flatpak and broader distributions.
+> ⚠️ MyKey relies on TPM PCR measurements tied to your boot process.  
+> To guarantee security, the boot chain must be predictable and verifiable.  
+> Unsupported configurations will cause sealed credentials to fail to unlock.
 
-## Disclaimer
+---
 
-MyKey Proxy was developed as a learning project by a cybersecurity student, focused on exploring platform security and authentication on Linux. It originated from a real-world problem that lacked a viable solution on the Linux desktop.
+## ⚠️ Disclaimer
 
-This project is in early development and has not undergone a formal security audit.
+MyKey is an experimental project developed as part of a cybersecurity learning project.
 
-⚠️ **Do not rely on this software for production use.**  
-Installation and daily use are not recommended at this stage. If you choose to use this software, you do so entirely at your own risk.
+This project:
+- has **not been formally audited**
+- is **still in active development**
+- is **not recommended for production use**
 
-No guarantees are made regarding the safety, security, or integrity of credentials, platform keys, or authentication operations performed by this software. Hardware-backed authentication is a sensitive domain—evaluate and use accordingly.
+Use at your own risk.
 
-Parts of this project were developed with the assistance of AI tools, including Claude by Anthropic. All architectural decisions and final implementations were reviewed and directed by a human. As with any security-sensitive software, you should review and understand the code before running it on your system.
+Hardware-backed authentication is serious — review and understand the system before relying on it.
 
-If you discover a security vulnerability, please open a GitHub issue or contact me directly before disclosing it publicly.
+Parts of this project were developed with the assistance of AI tools.  
+All design decisions and implementations were reviewed and directed by a human.
 
-## Project Roadmap
+If you discover a security issue, please report it responsibly.
+
+---
+
+## 🗺️ Project Roadmap
 
 ### ✅ Complete
 
-- WebAuthn request interception via Chromium extension  
-- Native host, daemon, and system tray (full multi-component architecture)  
-- AES-256-GCM encrypted IPC with HMAC signing and replay protection  
-- TPM2 hardware key sealing with PCR 0+7 policy binding  
-- Polkit-based desktop authentication with brute-force cooldown protection  
-- Process ancestry verification and binary integrity checks  
-- Hardened systemd service 
-- Secure Boot enforcement at daemon startup  
+- WebAuthn authentication via Chromium extension (`mykey-proxy`)  
+- Native host (`mykey-host`), daemon (`mykey-daemon`), and system tray (`mykey-tray`) architecture  
+- Encrypted IPC (AES-256-GCM + HMAC + replay protection)  
+- TPM2 key sealing with PCR 0+7 binding
+- Polkit authentication with brute-force protection  
+- Process verification and binary integrity checks  
+- Hardened systemd service  
+- Secure Boot validation at startup  
 
 ---
 
 ### 🚧 In Progress
 
-- GTK4 Desktop Manager (`mykey-proxy-manager`)  
+- GTK4 Desktop Manager (`mykey-manager`)  
+- Secret Service API (`mykey-secrets`)  
 
 ---
 
 ### 📦 Planned (Near Term)
 
-- WebAuthn request interception via Firefox extension  
-- Chrome Web Store and Firefox Add-ons submission  
-- AUR package distribution  
+- Firefox extension support (`mykey-proxy`)  
+- Chrome Web Store & Firefox Add-ons submission  
+- AUR package  
 
 ---
 
 ### 🚀 Future
 
-- Flatpak packaging  
-- PAM module for PIN-based authentication (`mykeypin.so`)
-- Mobile companion app (iOS & Android)  
+- PAM PIN module (`mykeypin.so`)
+- Flatpak distribution  
+- Mobile companion app  
 
-## Installation
+---
 
-1. Clone the repository:  
-   `git clone https://github.com/JamesFromFL/mykey-proxy`
-2. Run the installer:  
-   `./mykey-proxy/scripts/install.sh`
-3. Follow the on-screen prompts — the installer handles building, installing, Secure Boot checks, TPM verification, extension setup, and a final health check automatically.
+## 📥 Installation
 
-> ⚠️ Installation is under active development and may change in future releases.
+```bash
+git clone https://github.com/JamesFromFL/mykey-proxy
+cd mykey-proxy
+./scripts/install.sh
+```
+Follow the on-screen prompts — the installer handles:
 
-## Logs and Troubleshooting
+- TPM checks
+- Secure Boot validation
+- extension setup
+- system configuration
 
-- Daemon logs: `journalctl -u mykey-proxy-daemon -f`
-- Native host logs: `/tmp/mykey-proxy-host.log`
-- Extension logs: Chrome DevTools on the background service worker at `chrome://extensions/`
-- Tray logs: `journalctl --user -u mykey-proxy-tray -f`
+> ⚠️ Installation is under active development and may change.
 
-## Testing
+---
 
-Current testing has been performed on browser extension–based authentication flows:
+## 🗑️ Uninstall
 
-### WebAuthn (Extension)
+```bash
+git clone https://github.com/JamesFromFL/mykey-proxy
+cd mykey-proxy
+sudo ./scripts/uninstall.sh
+```
+> Removes all installed MyKey components from the system.
 
-- Visit [https://webauthn.io](https://webauthn.io)  
-- Enter a username and click **Register**  
-- Complete the authentication prompt (Linux password or PIN via Polkit)  
-- Verify successful registration and sign-in  
+---
 
-### Extension Compatibility
+## 🧪 Testing
 
-- **NordPass (v7.5.7)**  
-  - Enable biometric unlock in NordPass extension settings  
-  - Authentication is handled via a Polkit prompt  
-  - Biometric unlock functions successfully after approval  
+Current testing focuses on WebAuthn functionality via the browser extension.
 
-> ⚠️ Testing coverage is currently limited and focused on core functionality.  
-> Additional validation and edge-case testing will be expanded in future releases.
+### WebAuthn
+- Visit https://webauthn.io
+- Register a credential
+- Authenticate using your Linux credentials
 
-## License
+### Compatibility
+- NordPass (v7.5.7) — biometric unlock confirmed working via polkit
+
+> ⚠️ Testing is currently limited and will expand over time.
+
+---
+
+## 📜 License
 
 MIT — JamesFromFL, 2026
