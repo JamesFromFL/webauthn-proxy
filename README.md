@@ -178,7 +178,7 @@ If you discover a security issue, please report it responsibly.
 ## 📥 Installation
 
 ```bash
-git clone https://github.com/JamesFromFL/mykey-proxy
+git clone https://github.com/JamesFromFL/mykey
 cd mykey-proxy
 ./scripts/install.sh
 ```
@@ -196,7 +196,7 @@ Follow the on-screen prompts — the installer handles:
 ## 🗑️ Uninstall
 
 ```bash
-git clone https://github.com/JamesFromFL/mykey-proxy
+git clone https://github.com/JamesFromFL/mykey
 cd mykey-proxy
 sudo ./scripts/uninstall.sh
 ```
