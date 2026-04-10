@@ -731,14 +731,21 @@ sudo install -m 0644 "${SECRETS_DBUS_CONF_SRC}" \
     /etc/dbus-1/session.d/org.freedesktop.secrets.conf
 ok "/etc/dbus-1/session.d/org.freedesktop.secrets.conf"
 
-# ── 4.18 Install and enable mykey-secrets systemd service ────────────────────
+# ── 4.18 Install and enable mykey-secrets user service ───────────────────────
 echo ""
-info "Installing mykey-secrets systemd service..."
-sudo install -m 0644 "${SECRETS_SERVICE_SRC}" \
-    /etc/systemd/system/mykey-secrets.service
-sudo systemctl daemon-reload
-sudo systemctl enable mykey-secrets
-ok "mykey-secrets service enabled."
+info "Installing mykey-secrets user service..."
+
+cp "${SECRETS_SERVICE_SRC}" "${SYSTEMD_USER_DIR}/mykey-secrets.service"
+chmod 0644 "${SYSTEMD_USER_DIR}/mykey-secrets.service"
+
+systemctl --user daemon-reload
+systemctl --user enable --now mykey-secrets
+
+# Symlink fallback to guarantee enable persists
+ln -sf "${SYSTEMD_USER_DIR}/mykey-secrets.service" \
+       "${AUTOSTART_DIR}/mykey-secrets.service"
+
+ok "mykey-secrets service installed and enabled for user '${REAL_USER}'"
 
 # ════════════════════════════════════════════════════════════════════════════
 # PHASE 5 — SIGN BINARIES WITH SECURE BOOT KEYS
@@ -860,6 +867,16 @@ if systemctl --user is-active --quiet mykey-tray 2>/dev/null; then
 else
     warn "mykey-tray did not start — you can start it manually:"
     warn "systemctl --user start mykey-tray"
+fi
+
+info "Starting mykey-secrets..."
+systemctl --user start mykey-secrets 2>/dev/null || true
+sleep 1
+if systemctl --user is-active --quiet mykey-secrets 2>/dev/null; then
+    ok "mykey-secrets is running"
+else
+    warn "mykey-secrets did not start — you can start it manually:"
+    warn "systemctl --user start mykey-secrets"
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1136,11 +1153,11 @@ fi
 
 # [9/9] Secrets service
 echo "[9/9] Secrets service..."
-if systemctl is-active --quiet mykey-secrets 2>/dev/null; then
+if systemctl --user is-active --quiet mykey-secrets 2>/dev/null; then
     ok "mykey-secrets is running"
 else
     warn "mykey-secrets is not running"
-    warn "Start with: systemctl start mykey-secrets"
+    warn "Start with: systemctl --user start mykey-secrets"
 fi
 
 # ── Final summary ─────────────────────────────────────────────────────────

@@ -15,7 +15,10 @@ use std::io::Read;
 /// Run all prerequisite checks.  Returns Ok if every check passes, or
 /// Err(summary_string) listing every failure.
 pub fn enforce_prereqs() -> Result<(), String> {
-    let mut failures: Vec<String> = Vec::new();
+    // Binary integrity is intentionally not checked here.
+    // /etc/mykey/trusted-binaries.json is owned by the mykey system user and
+    // is not readable by a normal user session.  mykey-daemon enforces binary
+    // integrity at startup because it runs as the mykey system user.
 
     check_secure_boot();
 
@@ -34,19 +37,7 @@ pub fn enforce_prereqs() -> Result<(), String> {
         }
     }
 
-    match check_binary_hashes() {
-        Ok(()) => info!("[prereqs] Binary integrity: OK"),
-        Err(e) => {
-            error!("[prereqs] Binary integrity check failed: {}", e);
-            failures.push(format!("binary integrity: {e}"));
-        }
-    }
-
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
-    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

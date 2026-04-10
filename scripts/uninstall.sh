@@ -20,8 +20,16 @@ REAL_XDG_RUNTIME="/run/user/${REAL_USER_ID}"
 REAL_DBUS="unix:path=${REAL_XDG_RUNTIME}/bus"
 
 echo "==> Stopping services..."
-systemctl stop mykey-secrets 2>/dev/null || true
-systemctl disable mykey-secrets 2>/dev/null || true
+sudo -u "${REAL_USER}" \
+    XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
+    DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
+    systemctl --user stop mykey-secrets 2>/dev/null || true
+
+sudo -u "${REAL_USER}" \
+    XDG_RUNTIME_DIR="${REAL_XDG_RUNTIME}" \
+    DBUS_SESSION_BUS_ADDRESS="${REAL_DBUS}" \
+    systemctl --user disable mykey-secrets 2>/dev/null || true
+
 systemctl stop mykey-daemon 2>/dev/null || true
 systemctl disable mykey-daemon 2>/dev/null || true
 
@@ -42,8 +50,9 @@ rm -f /usr/local/bin/mykey-tray
 rm -f /usr/local/bin/mykey-secrets
 
 echo "==> Removing systemd units..."
-rm -f /etc/systemd/system/mykey-secrets.service
 rm -f /etc/systemd/system/mykey-daemon.service
+rm -f "${REAL_USER_HOME}/.config/systemd/user/mykey-secrets.service"
+rm -f "${REAL_USER_HOME}/.config/systemd/user/default.target.wants/mykey-secrets.service"
 rm -f "${REAL_USER_HOME}/.config/systemd/user/mykey-tray.service"
 rm -f "${REAL_USER_HOME}/.config/systemd/user/default.target.wants/mykey-tray.service"
 rm -f "${REAL_USER_HOME}/.config/systemd/user/graphical-session.target.wants/mykey-tray.service"
