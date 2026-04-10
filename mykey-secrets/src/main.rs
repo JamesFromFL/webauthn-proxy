@@ -6,6 +6,7 @@
 mod collection;
 mod daemon_client;
 mod item;
+mod prereqs;
 mod service;
 mod session;
 mod storage;
@@ -39,6 +40,12 @@ async fn main() {
         .init();
 
     info!("mykey-secrets starting");
+
+    if let Err(e) = prereqs::enforce_prereqs() {
+        error!("Prerequisites check failed: {}", e);
+        eprintln!("[mykey-secrets] Prerequisites check failed: {e}");
+        std::process::exit(1);
+    }
 
     // Shared connection cell: populated after the connection is built so that
     // CollectionInterface can register new ItemInterface objects at runtime.
