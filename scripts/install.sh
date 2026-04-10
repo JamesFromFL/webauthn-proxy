@@ -612,7 +612,7 @@ ok "Build complete: ${DAEMON_BINARY}"
 echo ""
 info "Installing binaries..."
 sudo install -m 0755 "${REPO_ROOT}/mykey-host/target/release/${HOST_BINARY}" "${HOST_DEST}"
-sudo install -m 0755 "${REPO_ROOT}/daemon/target/release/${DAEMON_BINARY}"    "${DAEMON_DEST}"
+sudo install -m 0755 "${REPO_ROOT}/mykey-daemon/target/release/${DAEMON_BINARY}" "${DAEMON_DEST}"
 ok "${HOST_DEST}"
 ok "${DAEMON_DEST}"
 
@@ -639,7 +639,7 @@ sudo tee "${TRUSTED_HASHES}" > /dev/null << EOF
 EOF
 sudo chmod 0644 "${TRUSTED_HASHES}"
 ok "mykey-host:  ${HOST_HASH}"
-ok "daemon:       ${DAEMON_HASH}"
+ok "mykey-daemon: ${DAEMON_HASH}"
 
 # ── 4.8 Install D-Bus system policy ──────────────────────────────────────
 echo ""
