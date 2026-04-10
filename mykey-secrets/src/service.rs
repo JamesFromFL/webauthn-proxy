@@ -5,11 +5,13 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use log::info;
+use log::{info, warn};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::interface;
 
+use crate::daemon_client::DaemonClient;
 use crate::session::SessionStore;
+use crate::storage;
 
 // ---------------------------------------------------------------------------
 // SecretStruct — the (session, parameters, value, content_type) tuple used
@@ -91,14 +93,30 @@ impl ServiceInterface {
 
     /// Search all collections for items whose attributes match `attributes`.
     ///
-    /// Returns `(unlocked_paths, locked_paths)`.
+    /// Returns `(unlocked_paths, locked_paths)`.  All items are unlocked.
     async fn search_items(
         &self,
         attributes: HashMap<String, String>,
     ) -> (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) {
-        let _ = attributes;
-        info!("[service] SearchItems (stub)");
-        (Vec::new(), Vec::new())
+        info!("[service] SearchItems");
+        let mut unlocked: Vec<OwnedObjectPath> = Vec::new();
+        for col in storage::load_collections() {
+            for item in storage::load_items(&col.id) {
+                let matches = attributes
+                    .iter()
+                    .all(|(k, v)| item.attributes.get(k) == Some(v));
+                if matches {
+                    match OwnedObjectPath::try_from(format!(
+                        "/org/freedesktop/secrets/collection/{}/{}",
+                        col.id, item.id
+                    )) {
+                        Ok(path) => unlocked.push(path),
+                        Err(e) => warn!("[service] SearchItems: bad path: {e}"),
+                    }
+                }
+            }
+        }
+        (unlocked, Vec::new())
     }
 
     // ── GetSecrets ───────────────────────────────────────────────────────────
@@ -109,9 +127,57 @@ impl ServiceInterface {
         items: Vec<OwnedObjectPath>,
         session: OwnedObjectPath,
     ) -> HashMap<OwnedObjectPath, SecretStruct> {
-        let _ = (items, session);
-        info!("[service] GetSecrets (stub)");
-        HashMap::new()
+        info!("[service] GetSecrets for {} item(s)", items.len());
+        if items.is_empty() {
+            return HashMap::new();
+        }
+
+        let client = match DaemonClient::connect() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("[service] GetSecrets: daemon connect failed: {e}");
+                return HashMap::new();
+            }
+        };
+
+        let mut result = HashMap::new();
+        for path in items {
+            // Path format: /org/freedesktop/secrets/collection/{col_id}/{item_id}
+            let parts: Vec<&str> = path.as_str().split('/').collect();
+            if parts.len() < 7 {
+                warn!("[service] GetSecrets: unexpected path format: {path}");
+                continue;
+            }
+            let col_id = parts[5];
+            let item_id = parts[6];
+
+            let stored = storage::load_items(col_id)
+                .into_iter()
+                .find(|i| i.id == item_id);
+            let stored = match stored {
+                Some(s) => s,
+                None => {
+                    warn!("[service] GetSecrets: item not found in storage: {path}");
+                    continue;
+                }
+            };
+
+            match client.unseal_secret(&stored.sealed_value) {
+                Ok(plaintext) => {
+                    result.insert(
+                        path,
+                        SecretStruct {
+                            session: session.clone(),
+                            parameters: Vec::new(),
+                            value: plaintext,
+                            content_type: stored.content_type,
+                        },
+                    );
+                }
+                Err(e) => warn!("[service] GetSecrets: unseal failed for {item_id}: {e}"),
+            }
+        }
+        result
     }
 
     // ── CreateCollection ─────────────────────────────────────────────────────

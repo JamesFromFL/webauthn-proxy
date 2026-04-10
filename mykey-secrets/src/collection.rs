@@ -4,10 +4,14 @@
 // at /org/freedesktop/secrets/collection/default.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use log::info;
 use zbus::zvariant::{OwnedObjectPath, Value};
 
+use crate::item::ItemInterface;
 use crate::service::SecretStruct;
+use crate::storage::{self, StoredItem};
 
 /// Implements org.freedesktop.Secret.Collection for a single collection.
 pub struct CollectionInterface {
@@ -17,6 +21,8 @@ pub struct CollectionInterface {
     pub modified: u64,
     /// Object paths of items belonging to this collection.
     pub item_paths: Vec<OwnedObjectPath>,
+    /// Shared connection, populated after startup, used to register new items.
+    pub conn: Arc<OnceLock<zbus::Connection>>,
 }
 
 #[zbus::interface(name = "org.freedesktop.Secret.Collection")]
@@ -58,33 +64,113 @@ impl CollectionInterface {
     }
 
     /// Search for items whose attributes are a superset of `attributes`.
+    /// Returns matching item paths (all items in this collection are unlocked).
     async fn search_items(
         &self,
         attributes: HashMap<String, String>,
     ) -> Vec<OwnedObjectPath> {
-        // Return all item paths whose stored attributes contain every key=value
-        // pair from the query.  Full implementation requires access to item
-        // attribute data; for now return the full item list as a stub.
-        let _ = attributes;
-        self.item_paths.clone()
+        storage::load_items(&self.id)
+            .into_iter()
+            .filter(|item| {
+                attributes
+                    .iter()
+                    .all(|(k, v)| item.attributes.get(k) == Some(v))
+            })
+            .filter_map(|item| {
+                OwnedObjectPath::try_from(format!(
+                    "/org/freedesktop/secrets/collection/{}/{}",
+                    self.id, item.id
+                ))
+                .ok()
+            })
+            .collect()
     }
 
     /// Create a new item in this collection.
     ///
-    /// Returns `(item_path, prompt_path)`.  Prompt path is "/" (no prompt).
+    /// Seals the secret via the TPM2 daemon, persists it to disk, registers
+    /// a new `ItemInterface` on the D-Bus object server, and returns
+    /// `(item_path, prompt_path)`.  Prompt path is "/" (no prompt needed).
     async fn create_item(
-        &self,
-        properties: HashMap<String, Value<'_>>,
+        &mut self,
+        mut properties: HashMap<String, Value<'_>>,
         secret: SecretStruct,
         replace: bool,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), zbus::fdo::Error> {
-        let _ = (properties, secret, replace);
-        info!("[collection] CreateItem called for collection={} (stub)", self.id);
-        // Stub: full implementation registers the item on the object path and
-        // persists via storage::save_item.
-        let item_path = OwnedObjectPath::try_from(
-            format!("/org/freedesktop/secrets/collection/{}/stub", self.id)
-        ).map_err(|e| zbus::fdo::Error::Failed(format!("Bad path: {e}")))?;
+        let _ = replace; // replace semantics not yet implemented
+        info!("[collection] CreateItem called for collection={}", self.id);
+
+        let item_id = uuid::Uuid::new_v4().to_string();
+        let item_path_str = format!(
+            "/org/freedesktop/secrets/collection/{}/{}",
+            self.id, item_id
+        );
+
+        // Extract label from properties (consumes the entry), defaulting to "Unnamed".
+        let label = match properties.remove("org.freedesktop.Secret.Item.Label") {
+            Some(Value::Str(s)) => s.to_string(),
+            _ => "Unnamed".to_string(),
+        };
+
+        // Extract attributes dict from properties (consumes the entry), defaulting to empty.
+        let attributes: HashMap<String, String> = properties
+            .remove("org.freedesktop.Secret.Item.Attributes")
+            .and_then(|v| HashMap::<String, String>::try_from(v).ok())
+            .unwrap_or_default();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Seal the plaintext secret via the TPM2 daemon.
+        let client = crate::daemon_client::DaemonClient::connect()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Daemon connect: {e}")))?;
+        let sealed = client
+            .seal_secret(&secret.value)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("SealSecret: {e}")))?;
+
+        // Persist to disk.
+        let stored = StoredItem {
+            id: item_id.clone(),
+            collection_id: self.id.clone(),
+            label: label.clone(),
+            attributes: attributes.clone(),
+            sealed_value: sealed.clone(),
+            content_type: secret.content_type.clone(),
+            created: now,
+            modified: now,
+        };
+        storage::save_item(&stored)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Save item: {e}")))?;
+
+        // Build the in-memory interface.
+        let item_iface = ItemInterface {
+            id: item_id.clone(),
+            collection_id: self.id.clone(),
+            label,
+            attributes,
+            content_type: secret.content_type,
+            created: now,
+            modified: now,
+            sealed_value: sealed,
+        };
+
+        // Register the new item on the D-Bus object server.
+        // Clone the Arc so the borrow on self ends before the await point.
+        let conn_arc = Arc::clone(&self.conn);
+        let conn = conn_arc.get().ok_or_else(|| {
+            zbus::fdo::Error::Failed("D-Bus connection not yet available".into())
+        })?;
+        conn.object_server()
+            .at(item_path_str.clone(), item_iface)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Register item on D-Bus: {e}")))?;
+
+        let item_path = OwnedObjectPath::try_from(item_path_str)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Bad item path: {e}")))?;
+        self.item_paths.push(item_path.clone());
+
         let prompt_path = OwnedObjectPath::try_from("/").unwrap();
         Ok((item_path, prompt_path))
     }
