@@ -726,6 +726,7 @@ ok "${SECRETS_DEST}"
 # ── 4.17 Install Secret Service D-Bus session policy ─────────────────────────
 echo ""
 info "Installing Secret Service D-Bus policy..."
+sudo mkdir -p /etc/dbus-1/session.d/
 sudo install -m 0644 "${SECRETS_DBUS_CONF_SRC}" \
     /etc/dbus-1/session.d/org.freedesktop.secrets.conf
 ok "/etc/dbus-1/session.d/org.freedesktop.secrets.conf"
@@ -1028,16 +1029,16 @@ echo " Phase 8 — Final Health Check"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
-# [1/8] Secure Boot
-echo "[1/8] Secure Boot..."
+# [1/9] Secure Boot
+echo "[1/9] Secure Boot..."
 SB_FINAL="$(detect_secure_boot_state)"
 case "${SB_FINAL}" in
     enabled) ok "Secure Boot is enabled" ;;
     *)       warn "Secure Boot is not enabled — key protection is reduced" ;;
 esac
 
-# [2/8] TPM2
-echo "[2/8] TPM2..."
+# [2/9] TPM2
+echo "[2/9] TPM2..."
 if [[ -c /dev/tpm0 && -c /dev/tpmrm0 ]]; then
     ok "TPM2 present"
 else
@@ -1045,9 +1046,9 @@ else
     FAILED=1
 fi
 
-# [3/8] Binaries
-echo "[3/8] Binaries..."
-for bin in "${HOST_BINARY}" "${DAEMON_BINARY}" "${TRAY_BINARY}"; do
+# [3/9] Binaries
+echo "[3/9] Binaries..."
+for bin in "${HOST_BINARY}" "${DAEMON_BINARY}" "${TRAY_BINARY}" "${SECRETS_BINARY}"; do
     if [[ -x "/usr/local/bin/${bin}" ]]; then
         ok "/usr/local/bin/${bin}"
     else
@@ -1056,8 +1057,8 @@ for bin in "${HOST_BINARY}" "${DAEMON_BINARY}" "${TRAY_BINARY}"; do
     fi
 done
 
-# [4/8] Configuration files
-echo "[4/8] Configuration..."
+# [4/9] Configuration files
+echo "[4/9] Configuration..."
 for f in \
     "${TRUSTED_HASHES}" \
     "${POLKIT_POLICY}" \
@@ -1071,8 +1072,8 @@ do
     fi
 done
 
-# [5/8] Extension ID
-echo "[5/8] Extension ID..."
+# [5/9] Extension ID
+echo "[5/9] Extension ID..."
 ID_SET=0
 for f in \
     "${CHROME_NMH_DIR}/com.mykey.host.json" \
@@ -1088,8 +1089,8 @@ if [[ "${ID_SET}" -eq 0 ]]; then
     FAILED=1
 fi
 
-# [6/8] Binary integrity
-echo "[6/8] Binary integrity..."
+# [6/9] Binary integrity
+echo "[6/9] Binary integrity..."
 if command -v python3 &>/dev/null; then
     sudo python3 - << 'PYEOF'
 import json, hashlib, sys
@@ -1115,8 +1116,8 @@ else
     warn "python3 not found — skipping hash verification"
 fi
 
-# [7/8] Daemon service
-echo "[7/8] Daemon service..."
+# [7/9] Daemon service
+echo "[7/9] Daemon service..."
 if systemctl is-active --quiet mykey-daemon; then
     ok "mykey-daemon is running"
 else
@@ -1124,13 +1125,22 @@ else
     FAILED=1
 fi
 
-# [8/8] Tray service
-echo "[8/8] Tray service..."
+# [8/9] Tray service
+echo "[8/9] Tray service..."
 if systemctl --user is-active --quiet mykey-tray 2>/dev/null; then
     ok "mykey-tray is running"
 else
     warn "mykey-tray is not running"
     warn "Start with: systemctl --user start mykey-tray"
+fi
+
+# [9/9] Secrets service
+echo "[9/9] Secrets service..."
+if systemctl is-active --quiet mykey-secrets 2>/dev/null; then
+    ok "mykey-secrets is running"
+else
+    warn "mykey-secrets is not running"
+    warn "Start with: systemctl start mykey-secrets"
 fi
 
 # ── Final summary ─────────────────────────────────────────────────────────
