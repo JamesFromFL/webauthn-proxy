@@ -604,7 +604,7 @@ ok "Build complete: ${HOST_BINARY}"
 # ── 4.3 Build daemon ──────────────────────────────────────────────────────
 echo ""
 info "Building ${DAEMON_BINARY} (release)..."
-cd "${REPO_ROOT}/daemon"
+cd "${REPO_ROOT}/mykey-daemon"
 RUSTFLAGS="-A warnings" "${CARGO}" build --features tpm2 --release
 ok "Build complete: ${DAEMON_BINARY}"
 
