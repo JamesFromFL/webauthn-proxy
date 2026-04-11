@@ -29,13 +29,13 @@ Built on TPM2, Secure Boot, and native Linux security components, MyKey brings t
 
 MyKey is made up of several components that work together:
 
-- ⚙️ **Daemon (m`mykey-daemon`)**  
+- ⚙️ **Daemon (`mykey-daemon`)**  
   Core background service handling authentication, TPM interaction, and security logic  
 
-- 🎛️ **GUI Manager (m`mykey-manager`)**  
+- 🎛️ **GUI Manager (`mykey-manager`)**  
   Desktop app for managing credentials, secrets, biometrics, and system security  
 
-- 🖥️ **System Tray (m`mykey-tray`)**  
+- 🖥️ **System Tray (`mykey-tray`)**  
   System tray interface for status and quick actions  
 
 - 🗝️ **Secret Service API (`mykey-secrets`)**  
