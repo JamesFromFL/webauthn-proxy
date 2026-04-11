@@ -29,25 +29,25 @@ Built on TPM2, Secure Boot, and native Linux security components, MyKey brings t
 
 MyKey is made up of several components that work together:
 
-- ⚙️ **Daemon (mykey-daemon)**  
+- ⚙️ **Daemon (m`mykey-daemon`)**  
   Core background service handling authentication, TPM interaction, and security logic  
 
-- 🎛️ **GUI Manager (mykey-manager)**  
+- 🎛️ **GUI Manager (m`mykey-manager`)**  
   Desktop app for managing credentials, secrets, biometrics, and system security  
 
-- 🖥️ **System Tray (mykey-tray)**  
+- 🖥️ **System Tray (m`mykey-tray`)**  
   System tray interface for status and quick actions  
 
-- 🗝️ **Secret Service API (mykey-secrets)**  
+- 🗝️ **Secret Service API (`mykey-secrets`)**  
   Secret Service API provider — a hardware-backed, desktop-agnostic replacement for KWallet and gnome-keyring  
 
 - 🔄 **Migration Tool (`mykey-migrate`)**  
   Bidirectional migration utility for securely transferring secrets between MyKey and other Secret Service providers
 
-- 🔌 **Native Host (mykey-host)**  
+- 🔌 **Native Host (`mykey-host`)**  
   Native messaging bridge between the browser and the system  
 
-- 🌐 **Browser Extension (mykey-proxy)**  
+- 🌐 **Browser Extension (`mykey-proxy`)**  
   Browser extension that enables WebAuthn authentication on Linux  
 
 - 📦 **Distribution**  
@@ -159,7 +159,7 @@ If you discover a security issue, please report it responsibly.
 
 - GTK4 Desktop Manager (`mykey-manager`)  
 - Secret Service API (`mykey-secrets`)  
-- Bidirectional Secret Service provider migration (`mykey-migrate')
+- Bidirectional Secret Service provider migration (`mykey-migrate`)
 
 ---
 
