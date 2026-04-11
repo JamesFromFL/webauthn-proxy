@@ -8,6 +8,7 @@ mod secrets_client;
 mod storage;
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_secs() -> u64 {
@@ -26,10 +27,14 @@ fn main() {
     println!();
 
     // 1. Detect provider
-    let provider_name = match secrets_client::detect_provider() {
-        Ok(name) => {
-            println!("Detected provider: {name}");
-            name
+    let provider = match secrets_client::detect_provider() {
+        Ok(p) => {
+            print!("Detected provider: {}", p.process_name);
+            if let Some(svc) = &p.service_name {
+                print!(" ({svc})");
+            }
+            println!();
+            p
         }
         Err(_) => {
             println!("No Secret Service provider detected. Nothing to migrate.");
@@ -50,7 +55,7 @@ fn main() {
     };
 
     // 3. Read all secrets from provider
-    println!("Reading secrets from {provider_name}...");
+    println!("Reading secrets from {}...", provider.process_name);
     let migrated_items = match secrets_client::read_all_secrets() {
         Ok(items) => items,
         Err(e) => {
@@ -59,7 +64,6 @@ fn main() {
         }
     };
 
-    // Count unique collections
     let collection_count = migrated_items
         .iter()
         .map(|i| i.collection_id.as_str())
@@ -78,8 +82,6 @@ fn main() {
     // 4. Seal, verify, and store each item
     let mut success_count = 0usize;
     let mut failed_count = 0usize;
-
-    // Track which collection IDs we have already created this run.
     let mut created_collections: HashMap<String, bool> = HashMap::new();
 
     for item in &migrated_items {
@@ -173,13 +175,69 @@ fn main() {
     // 6. All succeeded — stop the provider
     println!();
     println!("All secrets migrated and verified.");
-    println!("Stopping {provider_name}...");
+    println!("Stopping {}...", provider.process_name);
 
-    if let Err(e) = secrets_client::stop_provider(&provider_name) {
+    if let Err(e) = secrets_client::stop_provider(&provider) {
         eprintln!("[warn] Could not stop provider: {e}");
         // Migration succeeded; do not exit with error.
     }
 
     println!("Done. MyKey Secrets can now start as the Secret Service provider.");
     println!("Run: systemctl --user start mykey-secrets");
+
+    // 7. Optional keychain deletion
+    if let Some(ref keychain_path) = provider.keychain_path {
+        prompt_delete_keychain(&provider, keychain_path);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keychain deletion prompt
+// ---------------------------------------------------------------------------
+
+fn prompt_delete_keychain(provider: &secrets_client::ProviderInfo, keychain_path: &str) {
+    println!();
+    println!("═══════════════════════════════════════════════════");
+    println!("Optional: Delete old keychain");
+    println!("═══════════════════════════════════════════════════");
+    println!("Your secrets have been migrated and TPM2-sealed.");
+    println!("The old keychain ({keychain_path}) still exists on disk.");
+    println!();
+    println!("Deleting it is recommended — it contains your secrets");
+    println!("in a less secure format.");
+    println!();
+    println!("This is REVERSIBLE. If you uninstall MyKey, your secrets");
+    println!("will be restored back to a reinstalled provider.");
+    println!();
+
+    print!("Delete old keychain? [y/N]: ");
+    std::io::stdout().flush().ok();
+
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok();
+    if line.trim().to_lowercase() != "y" {
+        println!("Keychain kept. You can delete it later.");
+        return;
+    }
+
+    print!("Are you sure? This cannot be undone without MyKey. [y/N]: ");
+    std::io::stdout().flush().ok();
+
+    let mut confirm = String::new();
+    std::io::stdin().read_line(&mut confirm).ok();
+    if confirm.trim().to_lowercase() != "y" {
+        println!("Keychain kept. You can delete it later.");
+        return;
+    }
+
+    match std::fs::remove_dir_all(keychain_path) {
+        Ok(()) => {
+            let deleted_at = now_secs();
+            secrets_client::write_provider_info(provider, true, Some(deleted_at));
+            println!("✓ Old keychain deleted.");
+        }
+        Err(e) => {
+            eprintln!("[warn] Failed to delete keychain at {keychain_path}: {e}");
+        }
+    }
 }
