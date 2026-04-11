@@ -41,6 +41,9 @@ MyKey is made up of several components that work together:
 - 🗝️ **Secret Service API (mykey-secrets)**  
   Secret Service API provider — a hardware-backed, desktop-agnostic replacement for KWallet and gnome-keyring  
 
+- 🔄 **Migration Tool (`mykey-migrate`)**  
+  Bidirectional migration utility for securely transferring secrets between MyKey and other Secret Service providers
+
 - 🔌 **Native Host (mykey-host)**  
   Native messaging bridge between the browser and the system  
 
@@ -156,6 +159,7 @@ If you discover a security issue, please report it responsibly.
 
 - GTK4 Desktop Manager (`mykey-manager`)  
 - Secret Service API (`mykey-secrets`)  
+- Bidirectional Secret Service provider migration (`mykey-migrate')
 
 ---
 
