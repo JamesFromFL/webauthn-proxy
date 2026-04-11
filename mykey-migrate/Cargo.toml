@@ -1,0 +1,22 @@
+[package]
+name = "mykey-migrate"
+version = "0.1.0"
+edition = "2021"
+description = "Migration tool — imports secrets from any Secret Service provider into MyKey TPM2-sealed storage"
+license = "MIT"
+
+[[bin]]
+name = "mykey-migrate"
+path = "src/main.rs"
+
+[dependencies]
+zbus = { version = "4", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+uuid = { version = "1", features = ["v4"] }
+hex = "0.4"
+zeroize = { version = "1", features = ["derive"] }
+sha2 = "0.10"
