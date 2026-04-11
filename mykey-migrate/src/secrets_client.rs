@@ -23,7 +23,7 @@ const PROVIDER_DIR: &str = "/etc/mykey/provider";
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Detected Secret Service provider information.
+/// Detected Secret Service provider information (from live detection).
 pub struct ProviderInfo {
     pub process_name: String,
     pub pid: u32,
@@ -33,6 +33,16 @@ pub struct ProviderInfo {
     pub package_name: String,
     /// Known on-disk keychain location, if any.
     pub keychain_path: Option<String>,
+}
+
+/// Provider information read back from /etc/mykey/provider/info.json.
+#[derive(serde::Deserialize)]
+pub struct ProviderInfoFile {
+    pub process_name: String,
+    pub service_name: Option<String>,
+    pub package_name: String,
+    pub keychain_path: Option<String>,
+    pub keychain_deleted: bool,
 }
 
 /// A secret item read from the source Secret Service provider.
@@ -141,6 +151,20 @@ fn slugify(label: &str) -> String {
         .collect()
 }
 
+/// Return true if something currently owns `org.freedesktop.secrets` on the session bus.
+fn ss_still_owned() -> bool {
+    let conn = match Connection::session() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let proxy = match dbus_proxy(&conn) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let r: Result<String, _> = proxy.call("GetNameOwner", &(SS_DEST,));
+    r.is_ok()
+}
+
 // ---------------------------------------------------------------------------
 // Provider detection helpers
 // ---------------------------------------------------------------------------
@@ -153,7 +177,7 @@ fn detect_systemd_service(pid: u32) -> Option<String> {
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        // The first line is typically: "● service-name.service - Description"
+        // First line is typically: "● service-name.service - Description"
         let trimmed = line.trim_start_matches(|c: char| c == '\u{25cf}' || c == '*' || c == ' ');
         if let Some(word) = trimmed.split_whitespace().next() {
             if word.ends_with(".service") {
@@ -193,8 +217,19 @@ fn package_name_for(process_name: &str) -> String {
     }
 }
 
+/// Parse the ID field from /etc/os-release.
+fn detect_distro_id() -> Option<String> {
+    let content = std::fs::read_to_string("/etc/os-release").ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("ID=") {
+            return Some(rest.trim_matches('"').to_lowercase());
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
-// Public API
+// Public API — enroll (detection + read + stop)
 // ---------------------------------------------------------------------------
 
 /// Detect which Secret Service provider is currently running.
@@ -256,13 +291,10 @@ pub fn read_all_secrets() -> Result<Vec<MigratedItem>, String> {
         .map_err(|e| format!("OpenSession failed: {e}"))?;
 
     let col_paths = get_object_paths_prop(&conn, SS_PATH, SS_IFACE, "Collections")?;
-
     let mut items = Vec::new();
 
     for col_path in &col_paths {
         let col_str = col_path.as_str();
-
-        // Skip the "session" ephemeral collection — it has no persistent items.
         if col_str.ends_with("/session") {
             continue;
         }
@@ -325,25 +357,25 @@ pub fn read_all_secrets() -> Result<Vec<MigratedItem>, String> {
 ///
 /// Only called after all secrets have been successfully migrated and verified.
 pub fn stop_provider(info: &ProviderInfo) -> Result<(), String> {
-    let name_lower = info.process_name.to_lowercase();
-
-    if name_lower.contains("keepassxc") {
-        stop_keepassxc(info)?;
+    if info.process_name.to_lowercase().contains("keepassxc") {
+        stop_keepassxc()?;
     } else {
         stop_generic(info)?;
     }
-
     write_provider_info(info, false, None);
     Ok(())
 }
 
 /// Write /etc/mykey/provider/info.json recording what was disabled.
 ///
-/// `keychain_deleted` and `keychain_deleted_at` are updated separately after
-/// optional keychain deletion.
-pub fn write_provider_info(info: &ProviderInfo, keychain_deleted: bool, keychain_deleted_at: Option<u64>) {
+/// `keychain_deleted` and `keychain_deleted_at` are set when the user
+/// optionally removes the old keychain directory after migration.
+pub fn write_provider_info(
+    info: &ProviderInfo,
+    keychain_deleted: bool,
+    keychain_deleted_at: Option<u64>,
+) {
     use std::time::{SystemTime, UNIX_EPOCH};
-
     let migrated_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -377,25 +409,199 @@ pub fn write_provider_info(info: &ProviderInfo, keychain_deleted: bool, keychain
 }
 
 // ---------------------------------------------------------------------------
-// Stop helpers
+// Public API — unenroll (restore + cleanup)
 // ---------------------------------------------------------------------------
 
-/// Return true if something still owns `org.freedesktop.secrets` on the session bus.
-fn ss_still_owned() -> bool {
-    let conn = match Connection::session() {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let proxy = match dbus_proxy(&conn) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let r: Result<String, _> = proxy.call("GetNameOwner", &(SS_DEST,));
-    r.is_ok()
+/// Read and parse /etc/mykey/provider/info.json written during enroll.
+///
+/// Returns `Err` if the file does not exist — the caller treats this as
+/// "no migration was done, skip unenroll".
+pub fn read_provider_info() -> Result<ProviderInfoFile, String> {
+    let path = std::path::Path::new(PROVIDER_DIR).join("info.json");
+    let data = std::fs::read(&path)
+        .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    serde_json::from_slice(&data)
+        .map_err(|e| format!("Cannot parse provider info: {e}"))
 }
 
+/// Return true if `process_name` is findable on the system PATH or in /usr/bin.
+pub fn check_provider_installed(process_name: &str) -> bool {
+    if std::process::Command::new("which")
+        .arg(process_name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    std::path::Path::new("/usr/bin").join(process_name).exists()
+}
+
+/// Reinstall the old provider package using the system package manager.
+///
+/// Distro is detected from the `ID` field in `/etc/os-release`.
+pub fn reinstall_provider(package_name: &str) -> Result<(), String> {
+    let id = detect_distro_id();
+    let cmd_args: Vec<&str> = match id.as_deref() {
+        Some("arch") | Some("manjaro") => {
+            vec!["sudo", "pacman", "-S", "--noconfirm", package_name]
+        }
+        Some("ubuntu") | Some("debian") => {
+            vec!["sudo", "apt-get", "install", "-y", package_name]
+        }
+        Some("fedora") => {
+            vec!["sudo", "dnf", "install", "-y", package_name]
+        }
+        Some("opensuse") | Some("opensuse-leap") | Some("opensuse-tumbleweed") => {
+            vec!["sudo", "zypper", "install", "-y", package_name]
+        }
+        other => {
+            eprintln!("Unknown distro ID: {other:?}");
+            eprintln!("Install {package_name} manually, then run mykey-migrate --unenroll again.");
+            return Err(format!("Cannot detect package manager for distro: {other:?}"));
+        }
+    };
+
+    let status = std::process::Command::new(cmd_args[0])
+        .args(&cmd_args[1..])
+        .status()
+        .map_err(|e| format!("Failed to run package manager: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Package manager exited with status {status}"))
+    }
+}
+
+/// Start the old provider and wait up to 10 seconds for it to claim the bus.
+///
+/// Uses systemd if a service name is known; otherwise spawns the binary directly.
+pub fn start_provider(info: &ProviderInfoFile) -> Result<(), String> {
+    if let Some(svc) = &info.service_name {
+        std::process::Command::new("systemctl")
+            .args(["--user", "start", svc.as_str()])
+            .status()
+            .ok();
+        std::process::Command::new("systemctl")
+            .args(["--user", "enable", svc.as_str()])
+            .status()
+            .ok();
+    } else {
+        std::process::Command::new(&info.process_name)
+            .spawn()
+            .map_err(|e| format!("Failed to spawn {}: {e}", info.process_name))?;
+    }
+
+    // Poll every 500 ms for up to 10 seconds.
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(500));
+        if ss_still_owned() {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "{} did not claim org.freedesktop.secrets within 10 seconds",
+        info.process_name
+    ))
+}
+
+/// Write a single secret into the running Secret Service provider.
+///
+/// Uses the default collection alias.  Replaces any existing item with the same
+/// attributes (`replace: true`).
+pub fn write_secret_to_provider(
+    label: &str,
+    attributes: &HashMap<String, String>,
+    value: &[u8],
+    content_type: &str,
+) -> Result<(), String> {
+    let conn = session_bus()?;
+    let svc = service_proxy(&conn)?;
+
+    let (_, session_path): (OwnedValue, OwnedObjectPath) = svc
+        .call("OpenSession", &("plain", Value::from("")))
+        .map_err(|e| format!("OpenSession failed: {e}"))?;
+
+    let default_col = "/org/freedesktop/secrets/aliases/default";
+    let col_proxy = Proxy::new(&conn, SS_DEST, default_col, COL_IFACE)
+        .map_err(|e| format!("Collection proxy failed: {e}"))?;
+
+    // Properties dict: a{sv}
+    let mut props: HashMap<&str, Value<'_>> = HashMap::new();
+    props.insert("org.freedesktop.Secret.Item.Label", Value::from(label));
+    props.insert(
+        "org.freedesktop.Secret.Item.Attributes",
+        Value::from(attributes.clone()),
+    );
+
+    // Secret struct: (session_path, parameters, value, content_type)
+    let secret = (&session_path, Vec::<u8>::new(), value.to_vec(), content_type);
+
+    let _: (OwnedObjectPath, OwnedObjectPath) = col_proxy
+        .call("CreateItem", &(&props, &secret, true))
+        .map_err(|e| format!("CreateItem failed: {e}"))?;
+
+    Ok(())
+}
+
+/// List all (label, attributes) pairs from the running Secret Service provider.
+///
+/// Used during unenroll to detect which secrets are already in the old keychain
+/// so we can avoid writing duplicates.
+pub fn list_provider_secrets() -> Result<Vec<(String, HashMap<String, String>)>, String> {
+    let conn = session_bus()?;
+    let svc = service_proxy(&conn)?;
+
+    let (_, _session_path): (OwnedValue, OwnedObjectPath) = svc
+        .call("OpenSession", &("plain", Value::from("")))
+        .map_err(|e| format!("OpenSession failed: {e}"))?;
+
+    let col_paths = get_object_paths_prop(&conn, SS_PATH, SS_IFACE, "Collections")?;
+    let mut result = Vec::new();
+
+    for col_path in &col_paths {
+        let col_str = col_path.as_str();
+        if col_str.ends_with("/session") {
+            continue;
+        }
+        let item_paths = match get_object_paths_prop(&conn, col_str, COL_IFACE, "Items") {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        for item_path in &item_paths {
+            let item_str = item_path.as_str();
+            let label = get_string_prop(&conn, item_str, ITEM_IFACE, "Label").unwrap_or_default();
+            let attrs = get_attributes(&conn, item_str).unwrap_or_default();
+            result.push((label, attrs));
+        }
+    }
+
+    Ok(result)
+}
+
+/// Remove /etc/mykey/provider/info.json and the directory if it is then empty.
+pub fn delete_provider_info() -> Result<(), String> {
+    let path = std::path::Path::new(PROVIDER_DIR).join("info.json");
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Cannot remove {}: {e}", path.display()))?;
+    }
+    // Remove the directory only if it is now empty.
+    let dir = std::path::Path::new(PROVIDER_DIR);
+    if dir.exists() {
+        std::fs::remove_dir(dir).ok();
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stop helpers (enroll path)
+// ---------------------------------------------------------------------------
+
 /// Interactive stop flow for KeePassXC.
-fn stop_keepassxc(info: &ProviderInfo) -> Result<(), String> {
+fn stop_keepassxc() -> Result<(), String> {
     println!("KeePassXC detected as your Secret Service provider.");
     println!("MyKey cannot stop KeePassXC automatically.");
     println!("Please do the following before continuing:");
@@ -411,10 +617,8 @@ fn stop_keepassxc(info: &ProviderInfo) -> Result<(), String> {
 
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).ok();
-        let answer = line.trim().to_uppercase();
 
-        if answer == "Y" {
-            // Check if the name is still owned.
+        if line.trim().to_uppercase() == "Y" {
             if ss_still_owned() {
                 println!("KeePassXC is still running. Please close it completely.");
             } else {
@@ -424,14 +628,12 @@ fn stop_keepassxc(info: &ProviderInfo) -> Result<(), String> {
         } else {
             println!("Please complete the steps above before continuing.");
         }
-
-        let _ = info; // suppress unused warning
     }
 
     Ok(())
 }
 
-/// Stop a provider via systemd and/or pkill, then verify it is gone.
+/// Stop a provider via systemd and/or pkill, then verify it has released the bus.
 fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
     let run = |args: &[&str]| {
         std::process::Command::new(args[0])

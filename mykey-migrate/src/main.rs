@@ -1,7 +1,8 @@
 // main.rs — MyKey Migration Tool entry point.
 //
-// Reads all secrets from the running Secret Service provider and imports
-// them into MyKey's TPM2-sealed storage via mykey-daemon.
+// Supports two subcommands:
+//   --enroll    Migrate secrets from an existing provider to MyKey TPM2-sealed storage.
+//   --unenroll  Restore secrets from MyKey back to the previous provider.
 
 mod daemon_client;
 mod secrets_client;
@@ -18,7 +19,37 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+fn read_line() -> String {
+    let mut s = String::new();
+    std::io::stdin().read_line(&mut s).ok();
+    s
+}
+
+fn print_usage() {
+    println!("MyKey Migration Tool");
+    println!();
+    println!("Usage:");
+    println!("  mykey-migrate --enroll     Migrate secrets from existing provider to MyKey");
+    println!("  mykey-migrate --unenroll   Restore secrets from MyKey back to previous provider");
+}
+
 fn main() {
+    let arg = std::env::args().nth(1);
+    match arg.as_deref() {
+        Some("--enroll") => run_enroll(),
+        Some("--unenroll") => run_unenroll(),
+        _ => {
+            print_usage();
+            std::process::exit(0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --enroll
+// ---------------------------------------------------------------------------
+
+fn run_enroll() {
     // Banner
     println!("MyKey Migration Tool");
     println!("Migrates secrets from an existing Secret Service provider");
@@ -168,7 +199,7 @@ fn main() {
     if failed_count > 0 {
         println!();
         println!("Some items failed. Source provider has NOT been stopped.");
-        println!("Fix the errors above and run mykey-migrate again.");
+        println!("Fix the errors above and run mykey-migrate --enroll again.");
         std::process::exit(1);
     }
 
@@ -191,10 +222,6 @@ fn main() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Keychain deletion prompt
-// ---------------------------------------------------------------------------
-
 fn prompt_delete_keychain(provider: &secrets_client::ProviderInfo, keychain_path: &str) {
     println!();
     println!("═══════════════════════════════════════════════════");
@@ -212,20 +239,14 @@ fn prompt_delete_keychain(provider: &secrets_client::ProviderInfo, keychain_path
 
     print!("Delete old keychain? [y/N]: ");
     std::io::stdout().flush().ok();
-
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
-    if line.trim().to_lowercase() != "y" {
+    if read_line().trim().to_lowercase() != "y" {
         println!("Keychain kept. You can delete it later.");
         return;
     }
 
     print!("Are you sure? This cannot be undone without MyKey. [y/N]: ");
     std::io::stdout().flush().ok();
-
-    let mut confirm = String::new();
-    std::io::stdin().read_line(&mut confirm).ok();
-    if confirm.trim().to_lowercase() != "y" {
+    if read_line().trim().to_lowercase() != "y" {
         println!("Keychain kept. You can delete it later.");
         return;
     }
@@ -240,4 +261,171 @@ fn prompt_delete_keychain(provider: &secrets_client::ProviderInfo, keychain_path
             eprintln!("[warn] Failed to delete keychain at {keychain_path}: {e}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// --unenroll
+// ---------------------------------------------------------------------------
+
+fn run_unenroll() {
+    // 1. Read provider info
+    let info = match secrets_client::read_provider_info() {
+        Ok(i) => i,
+        Err(_) => {
+            println!("No provider info found. No migration to reverse.");
+            println!("Continuing with uninstall.");
+            return;
+        }
+    };
+
+    println!("MyKey Unenroll");
+    println!("Restoring secrets to: {}", info.process_name);
+    println!("Nothing in MyKey storage will be deleted until secrets are verified.");
+
+    // 2. Check if old provider is installed
+    if !secrets_client::check_provider_installed(&info.process_name) {
+        println!();
+        println!("⚠ Previous provider '{}' is not installed.", info.package_name);
+        print!("  Reinstall it now? [Y/N]: ");
+        std::io::stdout().flush().ok();
+        let answer = read_line();
+        if answer.trim().to_lowercase() == "y" {
+            match secrets_client::reinstall_provider(&info.package_name) {
+                Ok(_) => println!("✓ {} reinstalled.", info.package_name),
+                Err(e) => {
+                    eprintln!("✗ Failed to reinstall: {e}");
+                    eprintln!(
+                        "  Install {} manually then run mykey-migrate --unenroll again.",
+                        info.package_name
+                    );
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            eprintln!("Cannot unenroll without a Secret Service provider.");
+            eprintln!(
+                "Install {} then run mykey-migrate --unenroll again.",
+                info.package_name
+            );
+            std::process::exit(1);
+        }
+    }
+
+    // 3. Stop mykey-secrets to free org.freedesktop.secrets
+    println!("Stopping mykey-secrets...");
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "stop", "mykey-secrets"])
+        .status();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // 4. Connect to mykey-daemon for unsealing (must stay running)
+    let daemon = match daemon_client::DaemonClient::connect() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("✗ Cannot connect to mykey-daemon: {e}");
+            eprintln!("  mykey-daemon must be running for unenroll.");
+            eprintln!("  Start it with: systemctl start mykey-daemon");
+            std::process::exit(1);
+        }
+    };
+
+    // 5. Start old provider and wait for it to claim the bus
+    println!("Starting {}...", info.process_name);
+    match secrets_client::start_provider(&info) {
+        Ok(_) => println!("✓ {} is running", info.process_name),
+        Err(e) => {
+            eprintln!("✗ Failed to start provider: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    // 6. Load all MyKey secrets from storage
+    let collections = storage::load_collections();
+    let mut all_items: Vec<storage::StoredItem> = Vec::new();
+    for col in &collections {
+        all_items.extend(storage::load_items(&col.id));
+    }
+    println!("Found {} secret(s) in MyKey storage.", all_items.len());
+
+    // 7. Determine which secrets need restoring
+    let secrets_to_restore: Vec<&storage::StoredItem> = if info.keychain_deleted {
+        println!("Old keychain was deleted — restoring all {} secret(s).", all_items.len());
+        all_items.iter().collect()
+    } else {
+        let existing = secrets_client::list_provider_secrets().unwrap_or_default();
+        let existing_labels: std::collections::HashSet<String> =
+            existing.into_iter().map(|(label, _)| label).collect();
+        let new_secrets: Vec<&storage::StoredItem> = all_items
+            .iter()
+            .filter(|item| !existing_labels.contains(&item.label))
+            .collect();
+        println!(
+            "Found {} new secret(s) to restore (not in old keychain).",
+            new_secrets.len()
+        );
+        new_secrets
+    };
+
+    // 8. Unseal and write each secret back to old provider
+    let mut success = 0usize;
+    let mut failed = 0usize;
+
+    for item in &secrets_to_restore {
+        print!("Restoring: {}... ", item.label);
+        std::io::stdout().flush().ok();
+        match daemon.unseal_secret(&item.sealed_value) {
+            Ok(plaintext) => {
+                match secrets_client::write_secret_to_provider(
+                    &item.label,
+                    &item.attributes,
+                    &plaintext,
+                    &item.content_type,
+                ) {
+                    Ok(_) => {
+                        println!("✓");
+                        success += 1;
+                    }
+                    Err(e) => {
+                        println!("✗ Failed to write: {e}");
+                        failed += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                println!("✗ Failed to unseal: {e}");
+                failed += 1;
+            }
+        }
+    }
+
+    // 9. Summary and halt on failure
+    println!();
+    println!("Restore complete.");
+    println!("  Restored: {success}");
+    println!("  Failed:   {failed}");
+
+    if failed > 0 {
+        eprintln!("✗ Some secrets failed to restore.");
+        eprintln!("  MyKey storage has NOT been deleted.");
+        eprintln!("  Fix the errors above and run mykey-migrate --unenroll again.");
+        std::process::exit(1);
+    }
+
+    // 10. Clean up MyKey secrets storage
+    println!("All secrets restored. Cleaning up MyKey storage...");
+    if let Err(e) = std::fs::remove_dir_all("/etc/mykey/secrets") {
+        eprintln!("⚠ Could not remove /etc/mykey/secrets: {e}");
+    } else {
+        println!("✓ /etc/mykey/secrets removed.");
+    }
+
+    // 11. Remove provider info
+    let _ = secrets_client::delete_provider_info();
+    println!("✓ Provider info removed.");
+    println!();
+    println!(
+        "Unenroll complete. {} is now your Secret Service provider.",
+        info.process_name
+    );
+    println!("MyKey uninstall can now continue.");
 }
