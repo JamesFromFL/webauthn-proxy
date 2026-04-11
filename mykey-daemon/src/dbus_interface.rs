@@ -83,10 +83,16 @@ impl DaemonInterface {
     async fn connect(&self, pid: u32) -> Result<Vec<u8>, zbus::fdo::Error> {
         info!("[dbus] Connect called from pid={pid}");
 
-        if !validator::verify_caller_process(pid) {
+        let browser_ok = validator::verify_caller_process(pid);
+        let mykey_ok = if !browser_ok {
+            validator::verify_mykey_caller(pid)
+        } else {
+            false
+        };
+        if !browser_ok && !mykey_ok {
             warn!("[dbus] Connect rejected: pid={pid} failed caller verification");
             return Err(zbus::fdo::Error::AccessDenied(
-                format!("pid={pid} is not a Chrome/Chromium process"),
+                format!("pid={pid} is not a recognised browser or MyKey process"),
             ));
         }
 

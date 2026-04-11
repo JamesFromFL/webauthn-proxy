@@ -141,6 +141,67 @@ fn is_valid_browser_exe(path: &str) -> bool {
         || lower.contains("vivaldi")
 }
 
+/// Return true if the path/name belongs to a trusted MyKey binary.
+///
+/// Matched case-insensitively. Kept separate from `is_valid_browser_exe` —
+/// these callers have different ancestry characteristics (systemd or shell
+/// parents) and must not be conflated with browser processes.
+fn is_valid_mykey_exe(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("mykey-secrets")
+        || lower.contains("mykey-migrate")
+        || lower.contains("mykey-manager")
+}
+
+/// Verify that `pid` is a trusted MyKey binary.
+///
+/// Unlike [`verify_caller_process`], no ancestry check is performed — the
+/// parent of `mykey-secrets` is systemd and the parent of `mykey-migrate` is
+/// typically a shell; neither will match a meaningful allow-list.
+///
+/// Returns true if either `/proc/{pid}/exe` or `/proc/{pid}/cmdline` matches
+/// a known MyKey binary name.
+pub fn verify_mykey_caller(pid: u32) -> bool {
+    // Check exe symlink first.
+    match std::fs::read_link(format!("/proc/{pid}/exe")) {
+        Ok(exe) => {
+            let s = exe.to_string_lossy();
+            if is_valid_mykey_exe(&s) {
+                debug!("[validator] pid={pid} exe={s} — recognised MyKey binary");
+                return true;
+            }
+            debug!("[validator] pid={pid} exe={s} — not a recognised MyKey binary, checking cmdline");
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            debug!("[validator] pid={pid} exe unreadable (permission denied) — checking cmdline");
+        }
+        Err(e) => {
+            warn!("[validator] pid={pid} cannot read exe: {e}");
+        }
+    }
+
+    // Fall back to cmdline.
+    match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(cmdline) => {
+            let s = String::from_utf8_lossy(&cmdline);
+            if is_valid_mykey_exe(&s) {
+                debug!("[validator] pid={pid} cmdline contains MyKey binary identifier");
+                true
+            } else {
+                warn!(
+                    "[validator] pid={pid} cmdline does not contain MyKey binary identifier: {}",
+                    &s[..s.len().min(200)]
+                );
+                false
+            }
+        }
+        Err(e) => {
+            warn!("[validator] pid={pid} cannot read cmdline: {e}");
+            false
+        }
+    }
+}
+
 /// Parse the PPid field from /proc/{pid}/status.
 fn read_ppid(pid: u32) -> Option<u32> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
