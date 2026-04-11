@@ -3,7 +3,7 @@
 use ksni::{menu, Icon, Tray};
 
 static LOGO_BYTES: &[u8] =
-    include_bytes!("../assets/AuthnProxyLogoCircle.png");
+    include_bytes!("../../assets/mykey-logo.png");
 
 pub struct WebAuthnTray {
     icons: Vec<Icon>,
@@ -57,7 +57,7 @@ impl Tray for WebAuthnTray {
 }
 
 // ---------------------------------------------------------------------------
-// PNG → ksni ARGB32 icon conversion
+// PNG → ksni ARGB32 icon conversion (sizes: 16, 22, 32, 48, 64, 128)
 // ---------------------------------------------------------------------------
 
 fn load_icons() -> Vec<Icon> {
@@ -69,10 +69,10 @@ fn load_icons() -> Vec<Icon> {
         }
     };
 
-    vec![
-        encode_icon(&img, 128),
-        encode_icon(&img, 64),
-    ]
+    [16, 22, 32, 48, 64, 128]
+        .iter()
+        .map(|&size| encode_icon(&img, size))
+        .collect()
 }
 
 fn encode_icon(img: &image::DynamicImage, size: u32) -> Icon {
