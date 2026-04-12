@@ -747,6 +747,18 @@ ln -sf "${SYSTEMD_USER_DIR}/mykey-secrets.service" \
 
 ok "mykey-secrets service installed and enabled for user '${REAL_USER}'"
 
+# ── 4.19 Build mykey-migrate ─────────────────────────────────
+echo ""
+info "Building mykey-migrate (release)..."
+cd "${REPO_ROOT}/mykey-migrate"
+RUSTFLAGS="-A warnings" "${CARGO}" build --release
+ok "Build complete: mykey-migrate"
+
+# ── 4.20 Install mykey-migrate binary ────────────────────────
+sudo install -m 0755 "${REPO_ROOT}/mykey-migrate/target/release/mykey-migrate" \
+    "/usr/local/bin/mykey-migrate"
+ok "/usr/local/bin/mykey-migrate"
+
 # ════════════════════════════════════════════════════════════════════════════
 # PHASE 5 — SIGN BINARIES WITH SECURE BOOT KEYS
 # ════════════════════════════════════════════════════════════════════════════
@@ -868,6 +880,12 @@ else
     warn "mykey-tray did not start — you can start it manually:"
     warn "systemctl --user start mykey-tray"
 fi
+
+# Clean up stale log files that may be owned by mykey system user
+sudo rm -f /tmp/mykey-secrets.log
+sudo rm -f /tmp/mykey-daemon.log
+sudo rm -f /tmp/mykey-host.log
+sudo rm -f /tmp/mykey-tray.log
 
 info "Starting mykey-secrets..."
 systemctl --user start mykey-secrets 2>/dev/null || true
@@ -1065,7 +1083,7 @@ fi
 
 # [3/9] Binaries
 echo "[3/9] Binaries..."
-for bin in "${HOST_BINARY}" "${DAEMON_BINARY}" "${TRAY_BINARY}" "${SECRETS_BINARY}"; do
+for bin in "${HOST_BINARY}" "${DAEMON_BINARY}" "${TRAY_BINARY}" "${SECRETS_BINARY}" "mykey-migrate"; do
     if [[ -x "/usr/local/bin/${bin}" ]]; then
         ok "/usr/local/bin/${bin}"
     else

@@ -61,6 +61,7 @@ rm -f /usr/local/bin/mykey-host
 rm -f /usr/local/bin/mykey-daemon
 rm -f /usr/local/bin/mykey-tray
 rm -f /usr/local/bin/mykey-secrets
+rm -f /usr/local/bin/mykey-migrate
 
 echo "==> Removing systemd units..."
 rm -f /etc/systemd/system/mykey-daemon.service
