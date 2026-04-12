@@ -622,8 +622,12 @@ info "Creating ${WEBAUTHN_DIR}/ directories..."
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${WEBAUTHN_DIR}"
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${CREDENTIAL_DIR}"
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${KEY_DIR}"
+# Temporarily open /etc/mykey so the real user's secrets/ subdirectory can be created
+sudo chmod 755 "${WEBAUTHN_DIR}"
 sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/secrets"
 sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/secrets/default"
+# Restore /etc/mykey — 711 allows traversal by the real user without exposing listings
+sudo chmod 711 "${WEBAUTHN_DIR}"
 ok "Directories ready."
 
 # ── 4.7 Write initial trusted binary hashes ───────────────────────────────
@@ -739,7 +743,7 @@ cp "${SECRETS_SERVICE_SRC}" "${SYSTEMD_USER_DIR}/mykey-secrets.service"
 chmod 0644 "${SYSTEMD_USER_DIR}/mykey-secrets.service"
 
 systemctl --user daemon-reload
-systemctl --user enable --now mykey-secrets
+systemctl --user enable mykey-secrets
 
 # Symlink fallback to guarantee enable persists
 ln -sf "${SYSTEMD_USER_DIR}/mykey-secrets.service" \
