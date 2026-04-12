@@ -891,6 +891,74 @@ sudo rm -f /tmp/mykey-daemon.log
 sudo rm -f /tmp/mykey-host.log
 sudo rm -f /tmp/mykey-tray.log
 
+# ── Detect and stop any conflicting Secret Service provider ──────────────────
+echo ""
+info "Checking for conflicting Secret Service provider on the session bus..."
+
+SS_OWNER="$(dbus-send --session --print-reply \
+    --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus.GetNameOwner \
+    string:"org.freedesktop.secrets" 2>/dev/null \
+    | awk '/string/ { gsub(/"/, "", $2); print $2 }' || true)"
+
+if [[ -n "${SS_OWNER}" ]]; then
+    SS_PID="$(dbus-send --session --print-reply \
+        --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus.GetConnectionUnixProcessID \
+        string:"${SS_OWNER}" 2>/dev/null \
+        | awk '/uint32/ { print $2 }' || true)"
+
+    SS_PROC=""
+    if [[ -n "${SS_PID}" && -r "/proc/${SS_PID}/cmdline" ]]; then
+        SS_PROC="$(tr '\0' ' ' < "/proc/${SS_PID}/cmdline" \
+            | awk '{print $1}' | xargs basename 2>/dev/null)"
+    fi
+
+    warn "org.freedesktop.secrets is held by: ${SS_PROC:-unknown} (PID ${SS_PID:-?})"
+    info "Stopping conflicting provider before starting mykey-secrets..."
+
+    case "${SS_PROC}" in
+        gnome-keyring-daemon)
+            systemctl --user stop gnome-keyring.service          2>/dev/null || true
+            systemctl --user stop gnome-keyring-daemon.service   2>/dev/null || true
+            systemctl --user stop gnome-keyring-daemon.socket    2>/dev/null || true
+            ;;
+        kwalletd5|kwalletd6|kwalletd)
+            systemctl --user stop plasma-kwalletd5.service       2>/dev/null || true
+            systemctl --user stop kwalletd5.service              2>/dev/null || true
+            systemctl --user stop kwalletd6.service              2>/dev/null || true
+            ;;
+        keepassxc)
+            warn "KeePassXC is holding org.freedesktop.secrets."
+            warn "Please disable its Secret Service integration before installing:"
+            warn "  Tools → Settings → Secret Service Integration → uncheck Enable"
+            warn "Then re-run the installer."
+            FAILED=1
+            ;;
+    esac
+
+    # Kill directly as fallback for any provider not handled above
+    if [[ -n "${SS_PID}" ]]; then
+        kill "${SS_PID}" 2>/dev/null || true
+    fi
+
+    sleep 2
+
+    SS_STILL="$(dbus-send --session --print-reply \
+        --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus.GetNameOwner \
+        string:"org.freedesktop.secrets" 2>/dev/null \
+        | awk '/string/ { gsub(/"/, "", $2); print $2 }' || true)"
+
+    if [[ -n "${SS_STILL}" ]]; then
+        warn "org.freedesktop.secrets is still owned after stop attempt — mykey-secrets may fail to start"
+    else
+        ok "Conflicting provider stopped — org.freedesktop.secrets is now free"
+    fi
+else
+    ok "No conflicting Secret Service provider detected"
+fi
+
 info "Starting mykey-secrets..."
 systemctl --user start mykey-secrets 2>/dev/null || true
 sleep 1
