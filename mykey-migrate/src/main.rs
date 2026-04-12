@@ -367,6 +367,11 @@ fn run_unenroll() {
     };
 
     // 8. Unseal and write each secret back to old provider
+    println!("Unlocking keychain — you may be prompted for your password...");
+    if let Err(e) = secrets_client::unlock_default_collection() {
+        eprintln!("[warn] Could not unlock keychain: {e}");
+    }
+
     let mut success = 0usize;
     let mut failed = 0usize;
 

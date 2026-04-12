@@ -507,6 +507,52 @@ pub fn start_provider(info: &ProviderInfoFile) -> Result<(), String> {
     ))
 }
 
+/// Unlock the default Secret Service collection.
+///
+/// Calls `Unlock()` on the service with the default alias path.  If the provider
+/// returns a prompt path (i.e. the collection is locked), the prompt dialog is
+/// invoked and we wait 3 seconds for the user to respond.  Always returns `Ok(())`
+/// after the attempt — the caller should treat failures as non-fatal warnings.
+pub fn unlock_default_collection() -> Result<(), String> {
+    let conn = session_bus()?;
+    let svc = service_proxy(&conn)?;
+
+    let default_col = OwnedObjectPath::try_from("/org/freedesktop/secrets/aliases/default")
+        .map_err(|e| format!("Invalid object path: {e}"))?;
+
+    let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = svc
+        .call("Unlock", &(vec![default_col],))
+        .map_err(|e| format!("Unlock call failed: {e}"))?;
+
+    eprintln!(
+        "[info] Unlock: {} object(s) already unlocked, prompt={}",
+        unlocked.len(),
+        prompt.as_str()
+    );
+
+    if prompt.as_str() != "/" {
+        eprintln!("[info] Prompt required at {}; invoking...", prompt.as_str());
+        let prompt_proxy = Proxy::new(
+            &conn,
+            SS_DEST,
+            prompt.as_str(),
+            "org.freedesktop.Secret.Prompt",
+        )
+        .map_err(|e| format!("Prompt proxy failed: {e}"))?;
+
+        let _: () = prompt_proxy
+            .call("Prompt", &("",))
+            .map_err(|e| format!("Prompt invocation failed: {e}"))?;
+
+        std::thread::sleep(Duration::from_secs(3));
+        eprintln!("[info] Waited 3 seconds for unlock prompt response.");
+    } else {
+        eprintln!("[info] Collection already unlocked — no prompt needed.");
+    }
+
+    Ok(())
+}
+
 /// Write a single secret into the running Secret Service provider.
 ///
 /// Uses the default collection alias.  Replaces any existing item with the same
@@ -517,6 +563,10 @@ pub fn write_secret_to_provider(
     value: &[u8],
     content_type: &str,
 ) -> Result<(), String> {
+    if let Err(e) = unlock_default_collection() {
+        eprintln!("[warn] Could not unlock default collection: {e}");
+    }
+
     let conn = session_bus()?;
     let svc = service_proxy(&conn)?;
 

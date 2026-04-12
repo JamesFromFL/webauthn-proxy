@@ -622,8 +622,8 @@ info "Creating ${WEBAUTHN_DIR}/ directories..."
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${WEBAUTHN_DIR}"
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${CREDENTIAL_DIR}"
 sudo install -d -m 0700 -o "${DAEMON_USER}" "${KEY_DIR}"
-sudo install -d -m 0700 -o "${DAEMON_USER}" "${WEBAUTHN_DIR}/secrets"
-sudo install -d -m 0700 -o "${DAEMON_USER}" "${WEBAUTHN_DIR}/secrets/default"
+sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/secrets"
+sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/secrets/default"
 ok "Directories ready."
 
 # ── 4.7 Write initial trusted binary hashes ───────────────────────────────
