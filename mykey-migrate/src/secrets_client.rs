@@ -36,7 +36,7 @@ pub struct ProviderInfo {
 }
 
 /// Provider information read back from /etc/mykey/provider/info.json.
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ProviderInfoFile {
     pub process_name: String,
     pub service_name: Option<String>,
@@ -46,6 +46,7 @@ pub struct ProviderInfoFile {
 }
 
 /// A secret item read from the source Secret Service provider.
+#[derive(Clone)]
 pub struct MigratedItem {
     pub collection_label: String,
     pub collection_id: String,
@@ -352,8 +353,7 @@ pub fn read_all_secrets() -> Result<Vec<MigratedItem>, String> {
 /// Stop the detected Secret Service provider so MyKey can take over.
 ///
 /// KeePassXC requires interactive user confirmation; all other providers are
-/// stopped via systemd and/or pkill.  On success, writes a provider info file
-/// to `/etc/mykey/provider/info.json`.
+/// stopped via systemd and/or pkill.
 ///
 /// Only called after all secrets have been successfully migrated and verified.
 pub fn stop_provider(info: &ProviderInfo) -> Result<(), String> {
@@ -362,19 +362,14 @@ pub fn stop_provider(info: &ProviderInfo) -> Result<(), String> {
     } else {
         stop_generic(info)?;
     }
-    write_provider_info(info, false, None);
     Ok(())
 }
 
 /// Write /etc/mykey/provider/info.json recording what was disabled.
 ///
-/// `keychain_deleted` and `keychain_deleted_at` are set when the user
-/// optionally removes the old keychain directory after migration.
-pub fn write_provider_info(
-    info: &ProviderInfo,
-    keychain_deleted: bool,
-    keychain_deleted_at: Option<u64>,
-) {
+/// `keychain_deleted` defaults to false and can be updated later by the
+/// caller after the user optionally removes the old keychain directory.
+pub fn write_provider_info(info: &ProviderInfo) -> Result<(), String> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let migrated_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -387,25 +382,18 @@ pub fn write_provider_info(
         "package_name": info.package_name,
         "keychain_path": info.keychain_path,
         "disabled_by_mykey": true,
-        "keychain_deleted": keychain_deleted,
-        "keychain_deleted_at": keychain_deleted_at,
+        "keychain_deleted": false,
         "migrated_at": migrated_at,
     });
 
     let dir = std::path::Path::new(PROVIDER_DIR);
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        eprintln!("[warn] Cannot create {PROVIDER_DIR}: {e}");
-        return;
-    }
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("Cannot create {PROVIDER_DIR}: {e}"))?;
     let path = dir.join("info.json");
-    match serde_json::to_vec_pretty(&json) {
-        Ok(data) => {
-            if let Err(e) = std::fs::write(&path, data) {
-                eprintln!("[warn] Cannot write {}: {e}", path.display());
-            }
-        }
-        Err(e) => eprintln!("[warn] Cannot serialise provider info: {e}"),
-    }
+    let data = serde_json::to_vec_pretty(&json)
+        .map_err(|e| format!("Cannot serialise provider info: {e}"))?;
+    std::fs::write(&path, data)
+        .map_err(|e| format!("Cannot write {}: {e}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -710,4 +698,116 @@ fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// New helpers for enriched enroll/unenroll flows
+// ---------------------------------------------------------------------------
+
+/// Return true if `org.freedesktop.secrets` is currently owned by mykey-secrets.
+pub fn is_mykey_secrets_running() -> bool {
+    let conn = match Connection::session() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let dbus = match dbus_proxy(&conn) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let owner: String = match dbus.call("GetNameOwner", &(SS_DEST,)) {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let pid: u32 = match dbus.call("GetConnectionUnixProcessID", &(owner.as_str(),)) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let exe = cmdline
+        .split(|&b| b == 0)
+        .next()
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .unwrap_or("");
+    let name = std::path::Path::new(exe)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(exe);
+    name.contains("mykey-secrets")
+}
+
+/// Return the names of well-known Secret Service providers that are installed.
+///
+/// Checks for binary existence in /usr/bin.
+pub fn find_installed_providers() -> Vec<String> {
+    let candidates = [
+        ("gnome-keyring", "/usr/bin/gnome-keyring-daemon"),
+        ("kwalletd6", "/usr/bin/kwalletd6"),
+        ("kwalletd5", "/usr/bin/kwalletd5"),
+        ("keepassxc", "/usr/bin/keepassxc"),
+    ];
+    candidates
+        .iter()
+        .filter(|(_, path)| std::path::Path::new(path).exists())
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Start a provider by friendly name and wait up to 10 seconds for it to claim
+/// `org.freedesktop.secrets`.  KeePassXC is interactive.
+pub fn start_provider_by_name(name: &str) -> Result<(), String> {
+    match name {
+        "gnome-keyring" => {
+            std::process::Command::new("systemctl")
+                .args(["--user", "start", "gnome-keyring-daemon.service"])
+                .status()
+                .ok();
+            std::process::Command::new("systemctl")
+                .args(["--user", "start", "gnome-keyring-daemon.socket"])
+                .status()
+                .ok();
+        }
+        "kwalletd6" | "kwalletd5" => {
+            std::process::Command::new("systemctl")
+                .args(["--user", "start", "plasma-kwalletd.service"])
+                .status()
+                .ok();
+        }
+        "keepassxc" => {
+            println!("KeePassXC must be started manually.");
+            println!("  1. Open KeePassXC");
+            println!("  2. Go to Tools → Settings → Secret Service Integration");
+            println!("  3. Check 'Enable KeePassXC Secret Service integration'");
+            println!("  4. Click OK");
+            println!();
+            loop {
+                use std::io::Write as _;
+                print!("Press Enter once KeePassXC is running with Secret Service enabled: ");
+                std::io::stdout().flush().ok();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok();
+                if ss_still_owned() {
+                    return Ok(());
+                }
+                println!("org.freedesktop.secrets is not yet claimed — please complete the steps above.");
+            }
+        }
+        other => {
+            return Err(format!("Unknown provider name: {other}"));
+        }
+    }
+
+    // Poll every 500 ms for up to 10 seconds.
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(500));
+        if ss_still_owned() {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "{name} did not claim org.freedesktop.secrets within 10 seconds"
+    ))
 }

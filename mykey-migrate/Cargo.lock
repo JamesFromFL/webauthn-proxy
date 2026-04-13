@@ -671,6 +671,7 @@ dependencies = [
  "env_logger",
  "hex",
  "log",
+ "nix",
  "serde",
  "serde_json",
  "sha2",
