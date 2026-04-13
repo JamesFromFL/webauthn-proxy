@@ -158,6 +158,7 @@ fn do_migration(
     println!("  • Copy your secrets and seal them with your TPM2 chip");
     println!("  • Your original keychain will NOT be deleted (unless you choose to)");
     println!("  • All sealed secrets are verified before the old provider is stopped");
+    println!("  • This may take some time depending on the number of secrets — please be patient");
     println!();
     print!("Proceed? [Y/n]: ");
     flush_stdout();
