@@ -19,17 +19,20 @@ REAL_USER_ID=$(id -u "${REAL_USER}")
 REAL_XDG_RUNTIME="/run/user/${REAL_USER_ID}"
 REAL_DBUS="unix:path=${REAL_XDG_RUNTIME}/bus"
 
-# ── Reverse migration (must succeed before anything is removed) ──
+# ── Reverse migration — must succeed before anything is removed ───
 if [[ -f "/etc/mykey/provider/info.json" ]]; then
     echo "==> Secret Service provider detected — running unenroll..."
-    if ! /usr/local/bin/mykey-migrate --unenroll; then
+    echo "    Your secrets will be restored before MyKey is removed."
+    echo ""
+    if ! mykey-migrate --unenroll; then
         echo ""
         echo "ERROR: Unenroll failed. Uninstall has been halted."
-        echo "Your secrets are safe. Fix the error above and try again."
-        echo "Run: mykey-migrate --unenroll"
+        echo "Your secrets are safe in MyKey storage."
+        echo "Fix the error above then run: sudo ./scripts/uninstall.sh"
         exit 1
     fi
-    echo "✓ Unenroll complete."
+    echo ""
+    echo "✓ Secrets restored successfully."
 fi
 
 echo "==> Stopping services..."

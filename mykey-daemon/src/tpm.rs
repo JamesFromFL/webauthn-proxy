@@ -146,67 +146,168 @@ fn fallback_path(credential_id_hex: &str) -> PathBuf {
 // Blob API — seal/unseal raw bytes without credential-ID disk storage
 // ---------------------------------------------------------------------------
 
-/// Seal raw `data` bytes via the TPM2 and return the sealed blob as bytes.
+/// Seal raw `data` bytes using envelope encryption.
 ///
-/// The blob is a JSON object encoding the TPM2B_PUBLIC and TPM2B_PRIVATE of
-/// the sealed data object.  Pass the returned bytes directly to `unseal_blob`
-/// to recover the original data.  Nothing is written to disk.
+/// Generates a random 32-byte AES-256 key, encrypts `data` with AES-256-GCM,
+/// then TPM2-seals only the 32-byte key (always within the TPM sensitive data
+/// size limit).  Nothing is written to disk.
 ///
-/// ⚠ SOFTWARE FALLBACK — returns hex-encoded plaintext when the `tpm2`
+/// Blob format: `[4-byte sealed_key_len LE][sealed_key][12-byte nonce][ciphertext]`
+///
+/// ⚠ SOFTWARE FALLBACK — stores the AES key unprotected when the `tpm2`
 /// feature is absent.  Not production safe.
 #[cfg(feature = "tpm2")]
 pub fn seal_blob(data: &[u8]) -> Result<Vec<u8>, String> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Key, Nonce,
+    };
+    use rand::RngCore as _;
     use tpm2_impl::tpm_seal;
-    let (pub_bytes, priv_bytes) = tpm_seal(data)?;
-    serde_json::to_vec(&serde_json::json!({
+
+    // 1. Random 32-byte AES-256 key.
+    let mut aes_key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut aes_key);
+
+    // 2. Encrypt data with AES-256-GCM.
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key));
+    let mut nonce_bytes = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), data)
+        .map_err(|e| format!("AES-GCM encrypt: {e}"))?;
+
+    // 3. TPM2-seal only the 32-byte AES key.
+    let (pub_bytes, priv_bytes) = tpm_seal(&aes_key)?;
+    let sealed_key = serde_json::to_vec(&serde_json::json!({
         "public":  hex::encode(&pub_bytes),
         "private": hex::encode(&priv_bytes),
     }))
-    .map_err(|e| format!("JSON serialization error: {e}"))
+    .map_err(|e| format!("JSON serialization: {e}"))?;
+
+    // 4. Pack blob: [4-byte sealed_key_len LE][sealed_key][12-byte nonce][ciphertext]
+    let mut blob = Vec::with_capacity(4 + sealed_key.len() + 12 + ciphertext.len());
+    blob.extend_from_slice(&(sealed_key.len() as u32).to_le_bytes());
+    blob.extend_from_slice(&sealed_key);
+    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(&ciphertext);
+    Ok(blob)
 }
 
 #[cfg(not(feature = "tpm2"))]
 pub fn seal_blob(data: &[u8]) -> Result<Vec<u8>, String> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Key, Nonce,
+    };
+    use rand::RngCore as _;
+
     warn!(
-        "⚠ SOFTWARE FALLBACK (daemon): seal_blob storing {} bytes as plaintext hex. \
-         Enable --features tpm2 for real TPM sealing.",
+        "⚠ SOFTWARE FALLBACK (daemon): seal_blob protecting {} bytes with AES-GCM only \
+         (no TPM). Enable --features tpm2 for real TPM sealing.",
         data.len()
     );
-    Ok(hex::encode(data).into_bytes())
+
+    // 1. Random 32-byte AES-256 key (stored unprotected — fallback only).
+    let mut aes_key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut aes_key);
+
+    // 2. Encrypt data with AES-256-GCM.
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key));
+    let mut nonce_bytes = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), data)
+        .map_err(|e| format!("AES-GCM encrypt: {e}"))?;
+
+    // 3. Pack blob: [4-byte sealed_key_len LE][raw aes_key][12-byte nonce][ciphertext]
+    let mut blob = Vec::with_capacity(4 + 32 + 12 + ciphertext.len());
+    blob.extend_from_slice(&(32u32).to_le_bytes());
+    blob.extend_from_slice(&aes_key);
+    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(&ciphertext);
+    Ok(blob)
 }
 
 /// Unseal bytes from a blob produced by `seal_blob`.
 ///
-/// Fails if PCR 0 or PCR 7 have changed since the blob was sealed —
-/// indicating firmware or Secure Boot configuration tampering.
+/// Parses the envelope, TPM2-unseals the AES key, then AES-256-GCM decrypts
+/// the ciphertext.  Fails if PCR 0 or PCR 7 have changed since sealing.
 ///
-/// ⚠ SOFTWARE FALLBACK — hex-decodes plaintext when the `tpm2` feature is
-/// absent.
+/// ⚠ SOFTWARE FALLBACK — reads the AES key directly when the `tpm2` feature
+/// is absent.
 #[cfg(feature = "tpm2")]
 pub fn unseal_blob(blob: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Key, Nonce,
+    };
     use tpm2_impl::tpm_unseal;
-    let json: serde_json::Value = serde_json::from_slice(blob)
-        .map_err(|e| format!("Invalid blob JSON: {e}"))?;
+
+    // 1. Parse: [4-byte sealed_key_len][sealed_key][12-byte nonce][ciphertext]
+    if blob.len() < 4 {
+        return Err("Blob too short: missing length prefix".to_string());
+    }
+    let sealed_key_len =
+        u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+    if blob.len() < 4 + sealed_key_len + 12 {
+        return Err("Blob too short: truncated sealed key or nonce".to_string());
+    }
+    let sealed_key = &blob[4..4 + sealed_key_len];
+    let nonce_bytes = &blob[4 + sealed_key_len..4 + sealed_key_len + 12];
+    let ciphertext = &blob[4 + sealed_key_len + 12..];
+
+    // 2. TPM2-unseal the AES key.
+    let json: serde_json::Value = serde_json::from_slice(sealed_key)
+        .map_err(|e| format!("Invalid sealed-key JSON: {e}"))?;
     let pub_bytes = hex::decode(
-        json["public"].as_str().ok_or("Missing 'public' field in blob")?,
+        json["public"].as_str().ok_or("Missing 'public' in sealed key")?,
     )
     .map_err(|e| format!("Invalid hex in 'public': {e}"))?;
     let priv_bytes = hex::decode(
-        json["private"].as_str().ok_or("Missing 'private' field in blob")?,
+        json["private"].as_str().ok_or("Missing 'private' in sealed key")?,
     )
     .map_err(|e| format!("Invalid hex in 'private': {e}"))?;
-    tpm_unseal(&pub_bytes, &priv_bytes)
+    let aes_key = tpm_unseal(&pub_bytes, &priv_bytes)?;
+
+    // 3. AES-256-GCM decrypt.
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key));
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+        .map_err(|e| format!("AES-GCM decrypt: {e}"))?;
+
+    Ok(Zeroizing::new(plaintext))
 }
 
 #[cfg(not(feature = "tpm2"))]
 pub fn unseal_blob(blob: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
-    warn!("⚠ SOFTWARE FALLBACK (daemon): unseal_blob decoding plaintext hex.");
-    let hex_str = std::str::from_utf8(blob)
-        .map_err(|_| "Blob is not valid UTF-8".to_string())?
-        .trim();
-    let data = hex::decode(hex_str)
-        .map_err(|e| format!("Invalid hex in blob: {e}"))?;
-    Ok(Zeroizing::new(data))
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Key, Nonce,
+    };
+
+    warn!("⚠ SOFTWARE FALLBACK (daemon): unseal_blob using software AES-GCM only.");
+
+    // 1. Parse: [4-byte sealed_key_len][raw aes_key][12-byte nonce][ciphertext]
+    if blob.len() < 4 {
+        return Err("Blob too short: missing length prefix".to_string());
+    }
+    let sealed_key_len =
+        u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+    if blob.len() < 4 + sealed_key_len + 12 {
+        return Err("Blob too short: truncated sealed key or nonce".to_string());
+    }
+    let aes_key = &blob[4..4 + sealed_key_len];
+    let nonce_bytes = &blob[4 + sealed_key_len..4 + sealed_key_len + 12];
+    let ciphertext = &blob[4 + sealed_key_len + 12..];
+
+    // 2. AES-256-GCM decrypt.
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(aes_key));
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+        .map_err(|e| format!("AES-GCM decrypt: {e}"))?;
+
+    Ok(Zeroizing::new(plaintext))
 }
 
 // ---------------------------------------------------------------------------
