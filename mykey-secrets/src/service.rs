@@ -90,8 +90,9 @@ impl ServiceInterface {
             .unwrap()
             .create(algorithm);
 
+        let safe_session_id = session_id.replace('-', "_");
         let session_path = OwnedObjectPath::try_from(
-            format!("/org/freedesktop/secrets/sessions/{session_id}")
+            format!("/org/freedesktop/secrets/sessions/{safe_session_id}")
         )
         .map_err(|e| zbus::fdo::Error::Failed(format!("Bad session path: {e}")))?;
 
@@ -120,9 +121,11 @@ impl ServiceInterface {
                     .iter()
                     .all(|(k, v)| item.attributes.get(k) == Some(v));
                 if matches {
+                    // UUIDs contain hyphens which are invalid in D-Bus object paths.
+                    let safe_id = item.id.replace('-', "_");
                     match OwnedObjectPath::try_from(format!(
                         "/org/freedesktop/secrets/collection/{}/{}",
-                        col.id, item.id
+                        col.id, safe_id
                     )) {
                         Ok(path) => unlocked.push(path),
                         Err(e) => warn!("[service] SearchItems: bad path: {e}"),
@@ -188,13 +191,14 @@ impl ServiceInterface {
         let mut result = HashMap::new();
         for path in items {
             // Path format: /org/freedesktop/secrets/collection/{col_id}/{item_id}
+            // item_id in the path has underscores (D-Bus safe); on-disk UUIDs use hyphens.
             let parts: Vec<&str> = path.as_str().split('/').collect();
             if parts.len() < 7 {
                 warn!("[service] GetSecrets: unexpected path format: {path}");
                 continue;
             }
             let col_id = parts[5];
-            let item_id = parts[6];
+            let item_id = parts[6].replace('_', "-");
 
             let stored = storage::load_items(col_id)
                 .into_iter()

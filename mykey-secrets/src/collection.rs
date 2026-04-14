@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use log::info;
+use log::{info, warn};
 use zbus::zvariant::{OwnedObjectPath, Value};
 
 use crate::item::ItemInterface;
@@ -69,7 +69,8 @@ impl CollectionInterface {
         &self,
         attributes: HashMap<String, String>,
     ) -> Vec<OwnedObjectPath> {
-        storage::load_items(&self.id)
+        info!("[collection:{}] SearchItems {:?}", self.id, attributes);
+        let results: Vec<OwnedObjectPath> = storage::load_items(&self.id)
             .into_iter()
             .filter(|item| {
                 attributes
@@ -77,13 +78,22 @@ impl CollectionInterface {
                     .all(|(k, v)| item.attributes.get(k) == Some(v))
             })
             .filter_map(|item| {
-                OwnedObjectPath::try_from(format!(
+                // UUIDs contain hyphens which are invalid in D-Bus object paths.
+                let safe_id = item.id.replace('-', "_");
+                match OwnedObjectPath::try_from(format!(
                     "/org/freedesktop/secrets/collection/{}/{}",
-                    self.id, item.id
-                ))
-                .ok()
+                    self.id, safe_id
+                )) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        warn!("[collection:{}] SearchItems: bad path for {}: {e}", self.id, item.id);
+                        None
+                    }
+                }
             })
-            .collect()
+            .collect();
+        info!("[collection:{}] SearchItems found {} item(s)", self.id, results.len());
+        results
     }
 
     /// Create a new item in this collection.
@@ -101,9 +111,12 @@ impl CollectionInterface {
         info!("[collection] CreateItem called for collection={}", self.id);
 
         let item_id = uuid::Uuid::new_v4().to_string();
+        // D-Bus object paths cannot contain hyphens; replace with underscores for the path.
+        // The on-disk file continues to use the raw UUID (item_id) with hyphens.
+        let safe_item_id = item_id.replace('-', "_");
         let item_path_str = format!(
             "/org/freedesktop/secrets/collection/{}/{}",
-            self.id, item_id
+            self.id, safe_item_id
         );
 
         // Extract label from properties (consumes the entry), defaulting to "Unnamed".
