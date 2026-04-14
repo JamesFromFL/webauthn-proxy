@@ -38,18 +38,32 @@ pub struct SecretStruct {
 /// Implements org.freedesktop.Secret.Service.
 pub struct ServiceInterface {
     sessions: Mutex<SessionStore>,
+    /// Object paths of all registered collections.
+    collections: Vec<OwnedObjectPath>,
+    /// Object path that the "default" alias resolves to.
+    default_alias: OwnedObjectPath,
 }
 
 impl ServiceInterface {
-    pub fn new() -> Self {
+    pub fn new(collections: Vec<OwnedObjectPath>, default_alias: OwnedObjectPath) -> Self {
         ServiceInterface {
             sessions: Mutex::new(SessionStore::new()),
+            collections,
+            default_alias,
         }
     }
 }
 
 #[interface(name = "org.freedesktop.Secret.Service")]
 impl ServiceInterface {
+    // ── Properties ───────────────────────────────────────────────────────────
+
+    /// All collections currently registered with this service.
+    #[zbus(property)]
+    fn collections(&self) -> Vec<OwnedObjectPath> {
+        self.collections.clone()
+    }
+
     // ── OpenSession ──────────────────────────────────────────────────────────
 
     /// Open a new session.  Only the "plain" algorithm is supported.
@@ -98,7 +112,7 @@ impl ServiceInterface {
         &self,
         attributes: HashMap<String, String>,
     ) -> (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) {
-        info!("[service] SearchItems");
+        info!("[service] SearchItems {:?}", attributes);
         let mut unlocked: Vec<OwnedObjectPath> = Vec::new();
         for col in storage::load_collections() {
             for item in storage::load_items(&col.id) {
@@ -116,7 +130,38 @@ impl ServiceInterface {
                 }
             }
         }
+        info!("[service] SearchItems found {} item(s)", unlocked.len());
         (unlocked, Vec::new())
+    }
+
+    // ── Unlock ───────────────────────────────────────────────────────────────
+
+    /// Unlock a list of objects (collections or items).
+    ///
+    /// All MyKey items are always accessible — no unlock step is needed.
+    /// Returns `(unlocked, prompt)` where prompt is "/" (no prompt required).
+    async fn unlock(
+        &self,
+        objects: Vec<OwnedObjectPath>,
+    ) -> (Vec<OwnedObjectPath>, OwnedObjectPath) {
+        info!("[service] Unlock {} object(s)", objects.len());
+        let prompt = OwnedObjectPath::try_from("/").unwrap();
+        (objects, prompt)
+    }
+
+    // ── Lock ─────────────────────────────────────────────────────────────────
+
+    /// Lock a list of objects (no-op — MyKey secrets are always accessible).
+    ///
+    /// Returns `(locked, prompt)` where locked is empty and prompt is "/".
+    async fn lock(
+        &self,
+        objects: Vec<OwnedObjectPath>,
+    ) -> (Vec<OwnedObjectPath>, OwnedObjectPath) {
+        info!("[service] Lock {} object(s) (no-op)", objects.len());
+        let _ = objects;
+        let prompt = OwnedObjectPath::try_from("/").unwrap();
+        (Vec::new(), prompt)
     }
 
     // ── GetSecrets ───────────────────────────────────────────────────────────
@@ -201,10 +246,27 @@ impl ServiceInterface {
         Ok((col_path, prompt_path))
     }
 
-    // ── GetDefaultCollection (convenience, not in spec but widely expected) ──
+    // ── ReadAlias ────────────────────────────────────────────────────────────
 
-    /// Return the path of the default collection.
-    async fn get_default_collection(&self) -> OwnedObjectPath {
-        OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/default").unwrap()
+    /// Return the collection path that a named alias resolves to.
+    ///
+    /// The "default" alias points to the primary collection (the one holding
+    /// migrated secrets).  All other alias names return "/" (not found).
+    async fn read_alias(&self, name: String) -> OwnedObjectPath {
+        info!("[service] ReadAlias name={name}");
+        if name == "default" {
+            self.default_alias.clone()
+        } else {
+            OwnedObjectPath::try_from("/").unwrap()
+        }
+    }
+
+    /// Set a named alias for a collection (stub — alias reassignment not supported).
+    async fn set_alias(
+        &self,
+        _name: String,
+        _collection: OwnedObjectPath,
+    ) -> Result<(), zbus::fdo::Error> {
+        Ok(())
     }
 }
