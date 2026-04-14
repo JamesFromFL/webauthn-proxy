@@ -152,6 +152,7 @@ If you discover a security issue, please report it responsibly.
 - Process verification and binary integrity checks  
 - Hardened systemd service  
 - Secure Boot validation at startup  
+- Bidirectional Secret Service provider migration (`mykey-migrate`)
 
 ---
 
@@ -159,7 +160,6 @@ If you discover a security issue, please report it responsibly.
 
 - GTK4 Desktop Manager (`mykey-manager`)  
 - Secret Service API (`mykey-secrets`)  
-- Bidirectional Secret Service provider migration (`mykey-migrate`)
 
 ---
 
