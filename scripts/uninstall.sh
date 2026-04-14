@@ -6,13 +6,16 @@ echo " MyKey Uninstaller"
 echo "============================================================"
 echo ""
 
-mykey-migrate --unenroll
+mykey-migrate --unenroll || {
+    echo ""
+    echo "FATAL: mykey-migrate --unenroll failed — uninstallation aborted." >&2
+    echo "       Fix the error above and run ./scripts/uninstall.sh again." >&2
+    exit 1
+}
 
 echo "==> Removing user services..."
 systemctl --user stop mykey-tray 2>/dev/null || true
 systemctl --user disable mykey-tray 2>/dev/null || true
-systemctl --user stop mykey-secrets 2>/dev/null || true
-systemctl --user disable mykey-secrets 2>/dev/null || true
 rm -f "${HOME}/.config/systemd/user/mykey-secrets.service"
 rm -f "${HOME}/.config/systemd/user/default.target.wants/mykey-secrets.service"
 rm -f "${HOME}/.config/systemd/user/mykey-tray.service"
@@ -24,10 +27,7 @@ echo "==> Removing system components..."
 pkexec bash -c "
     systemctl stop mykey-daemon 2>/dev/null || true
     systemctl disable mykey-daemon 2>/dev/null || true
-    systemctl stop mykey-secrets.service 2>/dev/null || true
-    systemctl disable mykey-secrets.service 2>/dev/null || true
     rm -f /etc/systemd/system/mykey-daemon.service
-    rm -f /etc/systemd/system/mykey-secrets.service
     systemctl daemon-reload
     rm -f /usr/local/bin/mykey-host
     rm -f /usr/local/bin/mykey-daemon

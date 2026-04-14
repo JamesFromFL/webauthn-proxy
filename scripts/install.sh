@@ -871,9 +871,7 @@ sleep 2
 if systemctl is-active --quiet mykey-daemon; then
     ok "mykey-daemon is running"
 else
-    fail "mykey-daemon failed to start"
-    fail "Check: journalctl -u mykey-daemon -n 20"
-    FAILED=1
+    die "mykey-daemon failed to start. Check: journalctl -u mykey-daemon -n 20"
 fi
 
 info "Starting mykey-tray..."
@@ -895,11 +893,7 @@ sudo rm -f /tmp/mykey-tray.log
 # ── Secret Service enrollment ─────────────────────────────────────
 echo ""
 info "Running mykey-migrate --enroll..."
-mykey-migrate --enroll || {
-    fail "Enrollment failed. See above for details."
-    fail "Fix the error and run ./scripts/install.sh again."
-    FAILED=1
-}
+mykey-migrate --enroll || die "Enrollment failed. Fix the error above and run ./scripts/install.sh again."
 
 # ════════════════════════════════════════════════════════════════════════════
 # PHASE 7 — EXTENSION SETUP
