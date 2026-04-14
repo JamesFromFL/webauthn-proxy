@@ -56,7 +56,8 @@ fn run_enroll() {
     match daemon_client::DaemonClient::connect() {
         Err(_) => {
             eprintln!("mykey-daemon is not running.");
-            eprintln!("Install MyKey first: https://github.com/JamesFromFL/mykey");
+            eprintln!("Start it with:  sudo systemctl start mykey-daemon");
+            eprintln!("If not installed: https://github.com/JamesFromFL/mykey");
             std::process::exit(1);
         }
         Ok(daemon) => run_enroll_with_daemon(daemon),
@@ -80,14 +81,17 @@ fn run_enroll_with_daemon(daemon: daemon_client::DaemonClient) {
                 println!("No known Secret Service providers are installed.");
                 println!("There are no secrets to migrate.");
                 println!();
-                print!("Start mykey-secrets as your Secret Service provider? [Y/n]: ");
+                print!("Enable and start mykey-secrets as your Secret Service provider? [Y/n]: ");
                 flush_stdout();
                 let ans = read_line();
                 if ans.trim().to_lowercase() != "n" {
                     let _ = std::process::Command::new("systemctl")
+                        .args(["--user", "enable", "mykey-secrets"])
+                        .status();
+                    let _ = std::process::Command::new("systemctl")
                         .args(["--user", "start", "mykey-secrets"])
                         .status();
-                    println!("✓ mykey-secrets started.");
+                    println!("✓ mykey-secrets enabled and started.");
                 }
                 return;
             }
@@ -102,7 +106,10 @@ fn run_enroll_with_daemon(daemon: daemon_client::DaemonClient) {
             let ans = read_line();
 
             if ans.trim().to_lowercase() == "n" || ans.trim().is_empty() {
-                println!("No provider started. Starting mykey-secrets...");
+                println!("No provider started. Enabling and starting mykey-secrets...");
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "enable", "mykey-secrets"])
+                    .status();
                 let _ = std::process::Command::new("systemctl")
                     .args(["--user", "start", "mykey-secrets"])
                     .status();
@@ -133,10 +140,24 @@ fn run_enroll_with_daemon(daemon: daemon_client::DaemonClient) {
             }
         }
 
-        // Step 5 — mykey-secrets already owns the bus
+        // Step 5 — mykey-secrets already owns the bus — verify it is enabled
         Ok(ref info) if info.process_name.contains("mykey-secrets") => {
-            println!("MyKey is already your Secret Service provider.");
-            println!("Nothing to do.");
+            let is_enabled = std::process::Command::new("systemctl")
+                .args(["--user", "is-enabled", "--quiet", "mykey-secrets"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if is_enabled {
+                println!("MyKey is already your Secret Service provider — running and enabled.");
+                println!("Nothing to do.");
+            } else {
+                println!("MyKey is already running as your Secret Service provider.");
+                println!("⚠ mykey-secrets is not enabled — enabling so it starts automatically...");
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "enable", "mykey-secrets"])
+                    .status();
+                println!("✓ mykey-secrets enabled.");
+            }
         }
 
         // Step 6 — Third party provider is running
@@ -146,6 +167,9 @@ fn run_enroll_with_daemon(daemon: daemon_client::DaemonClient) {
     }
 
     if !secrets_client::ss_still_owned() || secrets_client::is_mykey_secrets_running() {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "mykey-secrets"])
+            .status();
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "start", "mykey-secrets"])
             .status();
@@ -170,7 +194,7 @@ fn do_migration(
     println!("  • This may take some time depending on the number of secrets — please be patient");
     println!();
     println!(
-        "⚠ Your previous Secret Service provider ({}) will be uninstalled. \
+        "⚠ Your previous Secret Service provider ({}) will be stopped and masked. \
 You can restore it at any time by running: mykey-migrate --unenroll",
         info.process_name
     );
@@ -286,8 +310,45 @@ You can restore it at any time by running: mykey-migrate --unenroll",
         eprintln!("  Run mykey-migrate --enroll again to retry.");
         std::process::exit(1);
     }
+    println!("✓ {} stopped.", info.process_name);
 
-    // Optional keychain deletion
+    // Enable and start mykey-secrets
+    println!("Enabling and starting mykey-secrets...");
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "enable", "mykey-secrets"])
+        .status();
+    let start_ok = std::process::Command::new("systemctl")
+        .args(["--user", "start", "mykey-secrets"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !start_ok {
+        eprintln!("✗ mykey-secrets failed to start.");
+        eprintln!("  Check: journalctl --user -u mykey-secrets");
+        std::process::exit(1);
+    }
+
+    // Verify mykey-secrets is running and enabled
+    let is_active = std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "mykey-secrets"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let is_enabled = std::process::Command::new("systemctl")
+        .args(["--user", "is-enabled", "--quiet", "mykey-secrets"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !is_active || !is_enabled {
+        eprintln!(
+            "✗ mykey-secrets verification failed (active={is_active}, enabled={is_enabled})."
+        );
+        eprintln!("  Check: journalctl --user -u mykey-secrets");
+        std::process::exit(1);
+    }
+    println!("✓ mykey-secrets is running and enabled.");
+
+    // Optional keychain deletion (after mykey-secrets is confirmed running)
     if let Some(ref kpath) = info.keychain_path {
         prompt_delete_keychain(kpath);
     }
@@ -366,7 +427,7 @@ fn run_unenroll() {
         }
     };
 
-    // Step 3 — Read provider info
+    // Step 3 — Read provider info and advise user of previous provider
     let info = secrets_client::read_provider_info().unwrap_or(
         secrets_client::ProviderInfoFile {
             process_name: String::new(),
@@ -376,9 +437,21 @@ fn run_unenroll() {
             keychain_deleted: false,
         }
     );
+    let has_prior = !info.process_name.is_empty();
+
+    println!();
+    if has_prior {
+        println!("Previously registered Secret Service provider: {}", info.process_name);
+        if let Some(ref svc) = info.service_name {
+            println!("  Systemd service: {svc}");
+        }
+    } else {
+        println!("No enrollment record found — MyKey may not have been set up via mykey-migrate.");
+        println!("You can still restore secrets to a new provider.");
+    }
+    println!();
 
     // Step 4 — Warning
-    println!();
     println!("╔══════════════════════════════════════════════════════╗");
     println!("║              MyKey Unenroll                          ║");
     println!("╚══════════════════════════════════════════════════════╝");
@@ -388,8 +461,6 @@ fn run_unenroll() {
     println!("  If restoration fails for any reason, unenroll will halt");
     println!("  and your MyKey secrets will remain intact.");
     println!();
-
-    let has_prior = !info.process_name.is_empty();
 
     // Step 5 — Provider selection
     // When no enrollment record exists, option 1 ("previously used") is hidden
@@ -415,9 +486,10 @@ fn run_unenroll() {
         print!("Enter selection [1-5]: ");
     }
     flush_stdout();
-    let selection = read_line();
-    let selection = selection.trim().to_string();
-    let selection = selection.as_str();
+    let raw = read_line();
+    let trimmed = raw.trim();
+    // Empty input selects option 1 (previously used, or gnome-keyring if no prior).
+    let selection: &str = if trimmed.is_empty() { "1" } else { trimmed };
 
     // Normalize: when has_prior is false the menu is 1–5 instead of 1–6.
     // Map to the canonical 1–6 numbering so all downstream logic is uniform.
@@ -465,12 +537,12 @@ fn run_unenroll() {
         }
         println!();
         println!("To confirm permanent deletion, type exactly:");
-        println!("  I understand my secrets will not be recoverable. Delete my secrets.");
+        println!("  Yes. Permanently delete all my keys without migrating to a new provider");
         println!();
         print!("> ");
         flush_stdout();
         let phrase = read_line();
-        if phrase.trim() != "I understand my secrets will not be recoverable. Delete my secrets." {
+        if phrase.trim() != "Yes. Permanently delete all my keys without migrating to a new provider" {
             println!("Phrase did not match. Cancelled.");
             return;
         }
@@ -527,6 +599,11 @@ fn run_unenroll() {
         .args(["--user", "stop", "mykey-secrets"])
         .status();
     std::thread::sleep(std::time::Duration::from_secs(2));
+    if secrets_client::is_mykey_secrets_running() {
+        eprintln!("✗ mykey-secrets did not stop — cannot safely proceed.");
+        std::process::exit(1);
+    }
+    println!("✓ mykey-secrets stopped.");
 
     // Step 8 — Start chosen provider
     println!("Starting {}...", target_provider);
@@ -637,16 +714,25 @@ fn run_unenroll() {
         std::process::exit(1);
     }
 
-    // Step 12 — Re-enable provider autostart (already done by start_provider)
+    // Step 12 — Ensure chosen provider is enabled for autostart
+    if let Some(ref svc) = tmp_info.service_name {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "enable", svc.as_str()])
+            .status();
+        println!("✓ {} enabled to start automatically.", target_provider);
+    }
 
     // Step 13 — Clean up MyKey storage
     println!("Cleaning up MyKey storage...");
     if let Err(e) = std::fs::remove_dir_all("/etc/mykey/secrets") {
-        eprintln!("⚠ Could not remove /etc/mykey/secrets: {e}");
-    } else {
-        println!("✓ /etc/mykey/secrets removed.");
+        eprintln!("✗ Could not remove /etc/mykey/secrets: {e}");
+        std::process::exit(1);
     }
-    let _ = secrets_client::delete_provider_info();
+    println!("✓ /etc/mykey/secrets removed.");
+    if let Err(e) = secrets_client::delete_provider_info() {
+        eprintln!("✗ Could not remove provider info: {e}");
+        std::process::exit(1);
+    }
     println!("✓ Provider info removed.");
     println!();
     println!(
