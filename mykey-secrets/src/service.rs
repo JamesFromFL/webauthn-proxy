@@ -180,7 +180,7 @@ impl ServiceInterface {
             return HashMap::new();
         }
 
-        let client = match DaemonClient::connect() {
+        let client = match DaemonClient::connect().await {
             Ok(c) => c,
             Err(e) => {
                 warn!("[service] GetSecrets: daemon connect failed: {e}");
@@ -211,7 +211,7 @@ impl ServiceInterface {
                 }
             };
 
-            match client.unseal_secret(&stored.sealed_value) {
+            match client.unseal_secret(&stored.sealed_value).await {
                 Ok(plaintext) => {
                     result.insert(
                         path,

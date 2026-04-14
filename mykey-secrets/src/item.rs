@@ -4,7 +4,7 @@
 // metadata; GetSecret/SetSecret delegate to the daemon for TPM2 sealing.
 
 use std::collections::HashMap;
-use log::{debug, info};
+use log::{debug, info, warn};
 use zbus::zvariant::OwnedObjectPath;
 
 use crate::service::SecretStruct;
@@ -68,10 +68,18 @@ impl ItemInterface {
     ) -> Result<SecretStruct, zbus::fdo::Error> {
         debug!("[item] GetSecret called for item={}", self.id);
         let client = crate::daemon_client::DaemonClient::connect()
-            .map_err(|e| zbus::fdo::Error::Failed(format!("Daemon connect: {e}")))?;
+            .await
+            .map_err(|e| {
+                warn!("[item] GetSecret: daemon connect failed for item={}: {e}", self.id);
+                zbus::fdo::Error::Failed(format!("Daemon connect: {e}"))
+            })?;
         let plaintext = client
             .unseal_secret(&self.sealed_value)
-            .map_err(|e| zbus::fdo::Error::Failed(format!("UnsealSecret: {e}")))?;
+            .await
+            .map_err(|e| {
+                warn!("[item] GetSecret: unseal failed for item={}: {e}", self.id);
+                zbus::fdo::Error::Failed(format!("UnsealSecret: {e}"))
+            })?;
         Ok(SecretStruct {
             session,
             parameters: Vec::new(),
@@ -84,10 +92,18 @@ impl ItemInterface {
     async fn set_secret(&mut self, secret: SecretStruct) -> Result<(), zbus::fdo::Error> {
         debug!("[item] SetSecret called for item={}", self.id);
         let client = crate::daemon_client::DaemonClient::connect()
-            .map_err(|e| zbus::fdo::Error::Failed(format!("Daemon connect: {e}")))?;
+            .await
+            .map_err(|e| {
+                warn!("[item] SetSecret: daemon connect failed for item={}: {e}", self.id);
+                zbus::fdo::Error::Failed(format!("Daemon connect: {e}"))
+            })?;
         let sealed = client
             .seal_secret(&secret.value)
-            .map_err(|e| zbus::fdo::Error::Failed(format!("SealSecret: {e}")))?;
+            .await
+            .map_err(|e| {
+                warn!("[item] SetSecret: seal failed for item={}: {e}", self.id);
+                zbus::fdo::Error::Failed(format!("SealSecret: {e}"))
+            })?;
         self.sealed_value = sealed.clone();
         self.content_type = secret.content_type.clone();
         self.modified = std::time::SystemTime::now()

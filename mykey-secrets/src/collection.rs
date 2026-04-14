@@ -138,9 +138,11 @@ impl CollectionInterface {
 
         // Seal the plaintext secret via the TPM2 daemon.
         let client = crate::daemon_client::DaemonClient::connect()
+            .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("Daemon connect: {e}")))?;
         let sealed = client
             .seal_secret(&secret.value)
+            .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("SealSecret: {e}")))?;
 
         // Persist to disk.
