@@ -626,6 +626,7 @@ sudo install -d -m 0700 -o "${DAEMON_USER}" "${KEY_DIR}"
 sudo chmod 755 "${WEBAUTHN_DIR}"
 sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/secrets"
 sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/secrets/default"
+sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/provider"
 # Restore /etc/mykey — 711 allows traversal by the real user without exposing listings
 sudo chmod 711 "${WEBAUTHN_DIR}"
 ok "Directories ready."

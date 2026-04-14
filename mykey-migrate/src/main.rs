@@ -141,6 +141,10 @@ fn run_enroll_with_daemon(daemon: daemon_client::DaemonClient) {
             do_migration(info, daemon);
         }
     }
+
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "start", "mykey-secrets"])
+        .status();
 }
 
 fn do_migration(
@@ -159,6 +163,12 @@ fn do_migration(
     println!("  • Your original keychain will NOT be deleted (unless you choose to)");
     println!("  • All sealed secrets are verified before the old provider is stopped");
     println!("  • This may take some time depending on the number of secrets — please be patient");
+    println!();
+    println!(
+        "⚠ Your previous Secret Service provider ({}) will be uninstalled. \
+You can restore it at any time by running: mykey-migrate --unenroll",
+        info.process_name
+    );
     println!();
     print!("Proceed? [Y/n]: ");
     flush_stdout();
@@ -361,14 +371,15 @@ fn run_unenroll() {
     };
 
     // Step 3 — Read provider info
-    let info = match secrets_client::read_provider_info() {
-        Ok(i) => i,
-        Err(_) => {
-            println!("No provider info found (/etc/mykey/provider/info.json).");
-            println!("MyKey was not enrolled via mykey-migrate. Nothing to unenroll.");
-            return;
+    let info = secrets_client::read_provider_info().unwrap_or(
+        secrets_client::ProviderInfoFile {
+            process_name: String::new(),
+            service_name: None,
+            package_name: String::new(),
+            keychain_path: None,
+            keychain_deleted: false,
         }
-    };
+    );
 
     // Step 4 — Warning
     println!();

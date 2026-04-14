@@ -352,8 +352,9 @@ pub fn read_all_secrets() -> Result<Vec<MigratedItem>, String> {
 
 /// Stop the detected Secret Service provider so MyKey can take over.
 ///
-/// KeePassXC requires interactive user confirmation; all other providers are
-/// stopped via systemd and/or pkill.
+/// KeePassXC requires interactive user confirmation and is NOT uninstalled.
+/// All other providers are stopped via systemd (service + socket units),
+/// pkill, and then uninstalled via the system package manager.
 ///
 /// Only called after all secrets have been successfully migrated and verified.
 pub fn stop_provider(info: &ProviderInfo) -> Result<(), String> {
@@ -671,7 +672,7 @@ fn stop_keepassxc() -> Result<(), String> {
     Ok(())
 }
 
-/// Stop a provider via systemd and/or pkill, then verify it has released the bus.
+/// Stop a provider via systemd (service + socket), pkill, then uninstall it.
 fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
     let run = |args: &[&str]| {
         std::process::Command::new(args[0])
@@ -680,16 +681,33 @@ fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
             .ok();
     };
 
+    // Step 1 — systemd: stop and disable the service and its companion socket.
     if let Some(svc) = &info.service_name {
         run(&["systemctl", "--user", "stop", svc.as_str()]);
         run(&["systemctl", "--user", "disable", svc.as_str()]);
+
+        // Socket unit: replace ".service" with ".socket" and attempt the same.
+        // Harmless if the socket unit does not exist.
+        let socket = svc.replace(".service", ".socket");
+        run(&["systemctl", "--user", "stop", socket.as_str()]);
+        run(&["systemctl", "--user", "disable", socket.as_str()]);
     }
 
-    // pkill as fallback regardless of whether systemd stopped it.
+    // Step 2 — pkill as fallback (covers D-Bus-activated providers with no
+    // systemd unit, and catches any process the service stop missed).
     run(&["pkill", "-f", info.process_name.as_str()]);
 
+    // Step 3 — uninstall the package so the provider cannot be restarted
+    // by socket activation or autostart after reboot.
+    if let Err(e) = uninstall_provider(&info.package_name) {
+        eprintln!("⚠ Could not uninstall {}: {e}", info.package_name);
+        eprintln!("  The provider may restart on next login. You can remove it manually.");
+    }
+
+    // Step 4 — give the process time to exit.
     std::thread::sleep(Duration::from_secs(2));
 
+    // Step 5 — verify the bus name has been released.
     if ss_still_owned() {
         Err(format!(
             "Could not stop {} — org.freedesktop.secrets is still owned",
@@ -697,6 +715,42 @@ fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
         ))
     } else {
         Ok(())
+    }
+}
+
+/// Uninstall a package using the system package manager detected from
+/// /etc/os-release.  Errors are non-fatal to the caller.
+fn uninstall_provider(package_name: &str) -> Result<(), String> {
+    let id = detect_distro_id();
+    let cmd: Vec<&str> = match id.as_deref() {
+        Some("arch") | Some("manjaro") => {
+            vec!["sudo", "pacman", "-Rns", "--noconfirm", package_name]
+        }
+        Some("ubuntu") | Some("debian") => {
+            vec!["sudo", "apt-get", "remove", "-y", package_name]
+        }
+        Some("fedora") => {
+            vec!["sudo", "dnf", "remove", "-y", package_name]
+        }
+        Some("opensuse") | Some("opensuse-leap") | Some("opensuse-tumbleweed") => {
+            vec!["sudo", "zypper", "remove", "-y", package_name]
+        }
+        other => {
+            return Err(format!(
+                "Unknown distro '{other:?}' — cannot detect package manager"
+            ));
+        }
+    };
+
+    let status = std::process::Command::new(cmd[0])
+        .args(&cmd[1..])
+        .status()
+        .map_err(|e| format!("Failed to run package manager: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Package manager exited with status {status}"))
     }
 }
 
