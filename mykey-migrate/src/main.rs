@@ -102,7 +102,10 @@ fn run_enroll_with_daemon(daemon: daemon_client::DaemonClient) {
             let ans = read_line();
 
             if ans.trim().to_lowercase() == "n" || ans.trim().is_empty() {
-                println!("No provider started. Nothing to migrate.");
+                println!("No provider started. Starting mykey-secrets...");
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "start", "mykey-secrets"])
+                    .status();
                 return;
             }
 
@@ -142,9 +145,11 @@ fn run_enroll_with_daemon(daemon: daemon_client::DaemonClient) {
         }
     }
 
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "start", "mykey-secrets"])
-        .status();
+    if !secrets_client::ss_still_owned() || secrets_client::is_mykey_secrets_running() {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "start", "mykey-secrets"])
+            .status();
+    }
 }
 
 fn do_migration(
@@ -276,19 +281,10 @@ You can restore it at any time by running: mykey-migrate --unenroll",
     println!();
     println!("Stopping {}...", info.process_name);
     if let Err(e) = secrets_client::stop_provider(&info) {
-        eprintln!("⚠ Warning: {e}");
-    }
-
-    // Start mykey-secrets
-    println!("Starting mykey-secrets...");
-    let status = std::process::Command::new("systemctl")
-        .args(["--user", "start", "mykey-secrets"])
-        .status();
-    match status {
-        Ok(s) if s.success() => println!("✓ mykey-secrets is running."),
-        _ => eprintln!(
-            "⚠ mykey-secrets may not have started. Check: journalctl --user -u mykey-secrets"
-        ),
+        eprintln!("✗ Failed to stop provider: {e}");
+        eprintln!("  Cannot start mykey-secrets while old provider owns the bus.");
+        eprintln!("  Run mykey-migrate --enroll again to retry.");
+        std::process::exit(1);
     }
 
     // Optional keychain deletion
@@ -393,30 +389,59 @@ fn run_unenroll() {
     println!("  and your MyKey secrets will remain intact.");
     println!();
 
+    let has_prior = !info.process_name.is_empty();
+
     // Step 5 — Provider selection
+    // When no enrollment record exists, option 1 ("previously used") is hidden
+    // and the remaining options are renumbered 1–5.
     println!("Where would you like to restore your secrets?");
     println!();
-    println!("  1. {} (previously used)", info.process_name);
-    println!("  2. gnome-keyring");
-    println!("  3. KWallet");
-    println!("  4. KeePassXC");
-    println!("  5. Exit");
-    println!("  6. None  ⚠ WARNING: your secrets will be deleted without a backup");
-    println!();
-    print!("Enter selection [1-6]: ");
+    if has_prior {
+        println!("  1. {} (previously used)", info.process_name);
+        println!("  2. gnome-keyring");
+        println!("  3. KWallet");
+        println!("  4. KeePassXC");
+        println!("  5. Exit");
+        println!("  6. None  ⚠ WARNING: your secrets will be deleted without a backup");
+        println!();
+        print!("Enter selection [1-6]: ");
+    } else {
+        println!("  1. gnome-keyring");
+        println!("  2. KWallet");
+        println!("  3. KeePassXC");
+        println!("  4. Exit");
+        println!("  5. None  ⚠ WARNING: your secrets will be deleted without a backup");
+        println!();
+        print!("Enter selection [1-5]: ");
+    }
     flush_stdout();
     let selection = read_line();
     let selection = selection.trim().to_string();
     let selection = selection.as_str();
 
+    // Normalize: when has_prior is false the menu is 1–5 instead of 1–6.
+    // Map to the canonical 1–6 numbering so all downstream logic is uniform.
+    let normalized: &str = if !has_prior {
+        match selection {
+            "1" => "2",
+            "2" => "3",
+            "3" => "4",
+            "4" => "5",
+            "5" => "6",
+            other => other,
+        }
+    } else {
+        selection
+    };
+
     // Handle Exit
-    if selection == "5" {
+    if normalized == "5" {
         println!("Exiting. Nothing was changed.");
         return;
     }
 
     // Handle None
-    if selection == "6" {
+    if normalized == "6" {
         println!();
         println!("╔══════════════════════════════════════════════════════════════╗");
         println!("║  ⚠  PERMANENT DELETION WARNING                              ║");
@@ -468,7 +493,7 @@ fn run_unenroll() {
     }
 
     // Determine target provider
-    let target_provider = match selection {
+    let target_provider = match normalized {
         "1" => info.process_name.clone(),
         "2" => "gnome-keyring-daemon".to_string(),
         "3" => "kwalletd6".to_string(),
@@ -509,10 +534,15 @@ fn run_unenroll() {
     // Build a temporary ProviderInfo for start_provider
     let tmp_info = secrets_client::ProviderInfoFile {
         process_name: target_provider.clone(),
-        service_name: match target_provider.as_str() {
-            "gnome-keyring-daemon" => Some("gnome-keyring-daemon.service".to_string()),
-            "kwalletd6" => Some("plasma-kwalletd.service".to_string()),
-            _ => None,
+        service_name: if normalized == "1" {
+            // Restore the exact service name that was recorded at enroll time.
+            info.service_name.clone()
+        } else {
+            match target_provider.as_str() {
+                "gnome-keyring-daemon" => Some("gnome-keyring-daemon.service".to_string()),
+                "kwalletd6" => Some("plasma-kwalletd.service".to_string()),
+                _ => None,
+            }
         },
         package_name: package_name.to_string(),
         keychain_path: None,

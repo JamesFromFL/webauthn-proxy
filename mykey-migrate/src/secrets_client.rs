@@ -153,7 +153,7 @@ fn slugify(label: &str) -> String {
 }
 
 /// Return true if something currently owns `org.freedesktop.secrets` on the session bus.
-fn ss_still_owned() -> bool {
+pub fn ss_still_owned() -> bool {
     let conn = match Connection::session() {
         Ok(c) => c,
         Err(_) => return false,
@@ -172,17 +172,28 @@ fn ss_still_owned() -> bool {
 
 /// Ask systemd which user service owns `pid` by parsing `systemctl --user status {pid}`.
 fn detect_systemd_service(pid: u32) -> Option<String> {
-    let output = std::process::Command::new("systemctl")
-        .args(["--user", "status", &pid.to_string()])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        // First line is typically: "● service-name.service - Description"
-        let trimmed = line.trim_start_matches(|c: char| c == '\u{25cf}' || c == '*' || c == ' ');
-        if let Some(word) = trimmed.split_whitespace().next() {
-            if word.ends_with(".service") {
-                return Some(word.to_string());
+    let pid_str = pid.to_string();
+    // Try user-level first, then system-level as fallback.
+    // Some providers (e.g. gnome-keyring started by the GNOME session manager)
+    // may not appear as user services and require the system-level query.
+    let attempts: [Vec<&str>; 2] = [
+        vec!["--user", "status", &pid_str],
+        vec!["status", &pid_str],
+    ];
+    for args in &attempts {
+        if let Ok(output) = std::process::Command::new("systemctl")
+            .args(args)
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                // First line is typically: "● service-name.service - Description"
+                let trimmed = line.trim_start_matches(|c: char| c == '\u{25cf}' || c == '*' || c == ' ');
+                if let Some(word) = trimmed.split_whitespace().next() {
+                    if word.ends_with(".service") {
+                        return Some(word.to_string());
+                    }
+                }
             }
         }
     }
@@ -552,10 +563,6 @@ pub fn write_secret_to_provider(
     value: &[u8],
     content_type: &str,
 ) -> Result<(), String> {
-    if let Err(e) = unlock_default_collection() {
-        eprintln!("[warn] Could not unlock default collection: {e}");
-    }
-
     let conn = session_bus()?;
     let svc = service_proxy(&conn)?;
 
@@ -681,33 +688,30 @@ fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
             .ok();
     };
 
-    // Step 1 — systemd: stop and disable the service and its companion socket.
+    // Step 1 — systemd: stop, disable, and mask the service and its companion socket.
+    // Masking prevents socket activation or autostart from reviving the provider
+    // (uninstalling often fails due to package dependencies, so masking is safer).
     if let Some(svc) = &info.service_name {
         run(&["systemctl", "--user", "stop", svc.as_str()]);
         run(&["systemctl", "--user", "disable", svc.as_str()]);
+        run(&["systemctl", "--user", "mask", svc.as_str()]);
 
-        // Socket unit: replace ".service" with ".socket" and attempt the same.
+        // Socket unit: replace ".service" with ".socket" and do the same.
         // Harmless if the socket unit does not exist.
         let socket = svc.replace(".service", ".socket");
         run(&["systemctl", "--user", "stop", socket.as_str()]);
         run(&["systemctl", "--user", "disable", socket.as_str()]);
+        run(&["systemctl", "--user", "mask", socket.as_str()]);
     }
 
     // Step 2 — pkill as fallback (covers D-Bus-activated providers with no
     // systemd unit, and catches any process the service stop missed).
     run(&["pkill", "-f", info.process_name.as_str()]);
 
-    // Step 3 — uninstall the package so the provider cannot be restarted
-    // by socket activation or autostart after reboot.
-    if let Err(e) = uninstall_provider(&info.package_name) {
-        eprintln!("⚠ Could not uninstall {}: {e}", info.package_name);
-        eprintln!("  The provider may restart on next login. You can remove it manually.");
-    }
-
-    // Step 4 — give the process time to exit.
+    // Step 3 — give the process time to exit.
     std::thread::sleep(Duration::from_secs(2));
 
-    // Step 5 — verify the bus name has been released.
+    // Step 4 — verify the bus name has been released.
     if ss_still_owned() {
         Err(format!(
             "Could not stop {} — org.freedesktop.secrets is still owned",
