@@ -4,13 +4,13 @@
 // /org/freedesktop/secrets on the session bus.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use log::{info, warn};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::interface;
 
 use crate::daemon_client::DaemonClient;
-use crate::session::SessionStore;
+use crate::session::{SessionInterface, SessionStore};
 use crate::storage;
 
 // ---------------------------------------------------------------------------
@@ -37,19 +37,29 @@ pub struct SecretStruct {
 
 /// Implements org.freedesktop.Secret.Service.
 pub struct ServiceInterface {
-    sessions: Mutex<SessionStore>,
+    /// Active sessions keyed by UUID.  Arc so SessionInterface instances can
+    /// call remove() when Close() is invoked by the client.
+    sessions: Arc<Mutex<SessionStore>>,
     /// Object paths of all registered collections.
     collections: Vec<OwnedObjectPath>,
     /// Object path that the "default" alias resolves to.
     default_alias: OwnedObjectPath,
+    /// Shared connection, populated after startup.  Used to register
+    /// SessionInterface objects when clients call OpenSession.
+    pub conn: Arc<OnceLock<zbus::Connection>>,
 }
 
 impl ServiceInterface {
-    pub fn new(collections: Vec<OwnedObjectPath>, default_alias: OwnedObjectPath) -> Self {
+    pub fn new(
+        collections: Vec<OwnedObjectPath>,
+        default_alias: OwnedObjectPath,
+        conn: Arc<OnceLock<zbus::Connection>>,
+    ) -> Self {
         ServiceInterface {
-            sessions: Mutex::new(SessionStore::new()),
+            sessions: Arc::new(Mutex::new(SessionStore::new())),
             collections,
             default_alias,
+            conn,
         }
     }
 }
@@ -91,10 +101,25 @@ impl ServiceInterface {
             .create(algorithm);
 
         let safe_session_id = session_id.replace('-', "_");
-        let session_path = OwnedObjectPath::try_from(
-            format!("/org/freedesktop/secrets/sessions/{safe_session_id}")
-        )
-        .map_err(|e| zbus::fdo::Error::Failed(format!("Bad session path: {e}")))?;
+        // Spec uses singular /session/ (not /sessions/).
+        let session_path_str = format!(
+            "/org/freedesktop/secrets/session/{safe_session_id}"
+        );
+        let session_path = OwnedObjectPath::try_from(session_path_str.clone())
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Bad session path: {e}")))?;
+
+        // Register a SessionInterface object so clients can call Close() on it.
+        // Pass a clone of the sessions Arc so Close() can remove the entry.
+        let conn = self.conn.get().ok_or_else(|| {
+            zbus::fdo::Error::Failed("D-Bus connection not yet available".into())
+        })?;
+        conn.object_server()
+            .at(session_path_str, SessionInterface {
+                session_id: session_id.clone(),
+                sessions: Arc::clone(&self.sessions),
+            })
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Register session on D-Bus: {e}")))?;
 
         // For "plain", the output is an empty string variant.
         let output = OwnedValue::try_from(Value::new(""))

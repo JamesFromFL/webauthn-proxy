@@ -11,7 +11,7 @@ use zbus::zvariant::{OwnedObjectPath, Value};
 
 use crate::item::ItemInterface;
 use crate::service::SecretStruct;
-use crate::storage::{self, StoredItem};
+use crate::storage::{self, StoredCollection, StoredItem};
 
 /// Implements org.freedesktop.Secret.Collection for a single collection.
 pub struct CollectionInterface {
@@ -53,6 +53,12 @@ impl CollectionInterface {
     fn modified(&self) -> u64 {
         self.modified
     }
+
+    // ── Signals ──────────────────────────────────────────────────────────────
+
+    /// Emitted when a new item is created in this collection.
+    #[zbus(signal)]
+    async fn item_created(ctxt: &zbus::SignalContext<'_>, item: OwnedObjectPath) -> zbus::Result<()>;
 
     // ── Methods ──────────────────────────────────────────────────────────────
 
@@ -98,6 +104,10 @@ impl CollectionInterface {
 
     /// Create a new item in this collection.
     ///
+    /// When `replace` is true and an existing item whose attributes are a
+    /// superset of the new item's attributes is found, that item is updated
+    /// in place (same UUID / path) rather than creating a duplicate.
+    ///
     /// Seals the secret via the TPM2 daemon, persists it to disk, registers
     /// a new `ItemInterface` on the D-Bus object server, and returns
     /// `(item_path, prompt_path)`.  Prompt path is "/" (no prompt needed).
@@ -107,25 +117,14 @@ impl CollectionInterface {
         secret: SecretStruct,
         replace: bool,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), zbus::fdo::Error> {
-        let _ = replace; // replace semantics not yet implemented
-        info!("[collection] CreateItem called for collection={}", self.id);
+        info!("[collection] CreateItem called for collection={} replace={replace}", self.id);
 
-        let item_id = uuid::Uuid::new_v4().to_string();
-        // D-Bus object paths cannot contain hyphens; replace with underscores for the path.
-        // The on-disk file continues to use the raw UUID (item_id) with hyphens.
-        let safe_item_id = item_id.replace('-', "_");
-        let item_path_str = format!(
-            "/org/freedesktop/secrets/collection/{}/{}",
-            self.id, safe_item_id
-        );
-
-        // Extract label from properties (consumes the entry), defaulting to "Unnamed".
+        // Extract label and attributes first so they are available for both
+        // the replace-search path and the new-item path below.
         let label = match properties.remove("org.freedesktop.Secret.Item.Label") {
             Some(Value::Str(s)) => s.to_string(),
             _ => "Unnamed".to_string(),
         };
-
-        // Extract attributes dict from properties (consumes the entry), defaulting to empty.
         let attributes: HashMap<String, String> = properties
             .remove("org.freedesktop.Secret.Item.Attributes")
             .and_then(|v| HashMap::<String, String>::try_from(v).ok())
@@ -145,6 +144,68 @@ impl CollectionInterface {
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("SealSecret: {e}")))?;
 
+        // Clone the Arc early so it is available to both paths below without
+        // needing to borrow self across await points.
+        let conn_arc = Arc::clone(&self.conn);
+
+        // ── Replace path ─────────────────────────────────────────────────────
+        // When replace=true, find any existing item whose stored attributes
+        // contain all of the new item's attributes.  Update it in place so
+        // clients receive the same item path they already know about.
+        if replace {
+            let existing = storage::load_items(&self.id)
+                .into_iter()
+                .find(|stored| {
+                    attributes
+                        .iter()
+                        .all(|(k, v)| stored.attributes.get(k) == Some(v))
+                });
+
+            if let Some(mut existing_item) = existing {
+                info!(
+                    "[collection] CreateItem replacing existing item={} in collection={}",
+                    existing_item.id, self.id
+                );
+                existing_item.sealed_value = sealed;
+                existing_item.content_type = secret.content_type;
+                existing_item.modified = now;
+                storage::save_item(&existing_item)
+                    .map_err(|e| zbus::fdo::Error::Failed(format!("Save item: {e}")))?;
+
+                // Update the collection's modified timestamp on disk.
+                self.modified = now;
+                if let Err(e) = storage::save_collection(&StoredCollection {
+                    id: self.id.clone(),
+                    label: self.label.clone(),
+                    created: self.created,
+                    modified: now,
+                }) {
+                    warn!("[collection] Failed to update collection modified time: {e}");
+                }
+
+                // D-Bus path uses underscores; on-disk UUID uses hyphens.
+                let safe_id = existing_item.id.replace('-', "_");
+                let item_path = OwnedObjectPath::try_from(format!(
+                    "/org/freedesktop/secrets/collection/{}/{}",
+                    self.id, safe_id
+                ))
+                .map_err(|e| zbus::fdo::Error::Failed(format!("Bad item path: {e}")))?;
+
+                let prompt_path = OwnedObjectPath::try_from("/").unwrap();
+                return Ok((item_path, prompt_path));
+            }
+        }
+
+        // ── New item path ────────────────────────────────────────────────────
+        let item_id = uuid::Uuid::new_v4().to_string();
+        // D-Bus object paths cannot contain hyphens; replace with underscores for the path.
+        // The on-disk file continues to use the raw UUID (item_id) with hyphens.
+        let safe_item_id = item_id.replace('-', "_");
+        let item_path_str = format!(
+            "/org/freedesktop/secrets/collection/{}/{}",
+            self.id, safe_item_id
+        );
+
         // Persist to disk.
         let stored = StoredItem {
             id: item_id.clone(),
@@ -159,6 +220,17 @@ impl CollectionInterface {
         storage::save_item(&stored)
             .map_err(|e| zbus::fdo::Error::Failed(format!("Save item: {e}")))?;
 
+        // Update the collection's modified timestamp on disk.
+        self.modified = now;
+        if let Err(e) = storage::save_collection(&StoredCollection {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            created: self.created,
+            modified: now,
+        }) {
+            warn!("[collection] Failed to update collection modified time: {e}");
+        }
+
         // Build the in-memory interface.
         let item_iface = ItemInterface {
             id: item_id.clone(),
@@ -169,11 +241,10 @@ impl CollectionInterface {
             created: now,
             modified: now,
             sealed_value: sealed,
+            conn: Arc::clone(&conn_arc),
         };
 
         // Register the new item on the D-Bus object server.
-        // Clone the Arc so the borrow on self ends before the await point.
-        let conn_arc = Arc::clone(&self.conn);
         let conn = conn_arc.get().ok_or_else(|| {
             zbus::fdo::Error::Failed("D-Bus connection not yet available".into())
         })?;
@@ -185,6 +256,17 @@ impl CollectionInterface {
         let item_path = OwnedObjectPath::try_from(item_path_str)
             .map_err(|e| zbus::fdo::Error::Failed(format!("Bad item path: {e}")))?;
         self.item_paths.push(item_path.clone());
+
+        // Emit ItemCreated signal so clients with subscriptions are notified.
+        let col_path = format!("/org/freedesktop/secrets/collection/{}", self.id);
+        match zbus::SignalContext::new(conn, col_path.as_str()) {
+            Ok(signal_ctxt) => {
+                if let Err(e) = CollectionInterface::item_created(&signal_ctxt, item_path.clone()).await {
+                    warn!("[collection] ItemCreated signal failed: {e}");
+                }
+            }
+            Err(e) => warn!("[collection] Could not build signal context for ItemCreated: {e}"),
+        }
 
         let prompt_path = OwnedObjectPath::try_from("/").unwrap();
         Ok((item_path, prompt_path))

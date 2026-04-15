@@ -4,6 +4,7 @@
 // metadata; GetSecret/SetSecret delegate to the daemon for TPM2 sealing.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use log::{debug, info, warn};
 use zbus::zvariant::OwnedObjectPath;
 
@@ -20,6 +21,8 @@ pub struct ItemInterface {
     pub modified: u64,
     /// TPM2-sealed secret bytes (empty until a secret is stored).
     pub sealed_value: Vec<u8>,
+    /// Shared connection, used to unregister this D-Bus object on Delete().
+    pub conn: Arc<OnceLock<zbus::Connection>>,
 }
 
 #[zbus::interface(name = "org.freedesktop.Secret.Item")]
@@ -58,6 +61,23 @@ impl ItemInterface {
         info!("[item] Delete called for item={}", self.id);
         crate::storage::delete_item(&self.collection_id, &self.id)
             .map_err(|e| zbus::fdo::Error::Failed(format!("Delete failed: {e}")))?;
+
+        // Unregister the D-Bus object so the path no longer responds after deletion.
+        // TODO: the parent CollectionInterface's item_paths Vec is not updated here;
+        //       the Items property on the collection will remain stale until restart.
+        let safe_id = self.id.replace('-', "_");
+        let item_path = format!(
+            "/org/freedesktop/secrets/collection/{}/{}",
+            self.collection_id, safe_id
+        );
+        if let Some(conn) = self.conn.get() {
+            match conn.object_server().remove::<ItemInterface, _>(item_path.as_str()).await {
+                Ok(true) => info!("[item] Unregistered D-Bus object at {item_path}"),
+                Ok(false) => warn!("[item] D-Bus object not found at {item_path}"),
+                Err(e) => warn!("[item] Failed to unregister D-Bus object at {item_path}: {e}"),
+            }
+        }
+
         Ok(OwnedObjectPath::try_from("/").unwrap())
     }
 

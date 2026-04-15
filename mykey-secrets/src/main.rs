@@ -107,7 +107,7 @@ async fn main() {
         default_alias.as_str()
     );
 
-    let svc = service::ServiceInterface::new(col_paths, default_alias.clone());
+    let svc = service::ServiceInterface::new(col_paths, default_alias.clone(), Arc::clone(&conn_cell));
 
     // Build the D-Bus connection.  Only the top-level ServiceInterface is
     // registered here; all collections and items are registered below after
@@ -190,6 +190,7 @@ async fn main() {
                 created: item.created,
                 modified: item.modified,
                 sealed_value: item.sealed_value,
+                conn: Arc::clone(&conn_cell),
             };
             if let Err(e) = conn.object_server().at(item_path.clone(), item_iface).await {
                 warn!("Could not register item at {item_path}: {e}");
@@ -197,48 +198,12 @@ async fn main() {
         }
     }
 
-    // Register /org/freedesktop/secrets/aliases/default pointing at the
-    // primary collection.  Many clients (libsecret, go-keyring used by gh,
-    // etc.) call CreateItem and SearchItems directly on this alias path rather
-    // than on the canonical collection path.
-    let alias_source = stored_cols
-        .iter()
-        .find(|c| c.id == default_alias_id)
-        .cloned();
-
-    if let Some(col_meta) = alias_source {
-        let col_path_str = format!(
-            "/org/freedesktop/secrets/collection/{}",
-            col_meta.id
-        );
-        let stored_items = storage::load_items(&col_meta.id);
-        let item_paths: Vec<OwnedObjectPath> = stored_items
-            .iter()
-            .filter_map(|i| {
-                let safe_id = i.id.replace('-', "_");
-                OwnedObjectPath::try_from(format!("{}/{}", col_path_str, safe_id)).ok()
-            })
-            .collect();
-
-        let alias_iface = CollectionInterface {
-            id: col_meta.id.clone(),
-            label: col_meta.label.clone(),
-            created: col_meta.created,
-            modified: col_meta.modified,
-            item_paths,
-            conn: Arc::clone(&conn_cell),
-        };
-
-        if let Err(e) = conn
-            .object_server()
-            .at("/org/freedesktop/secrets/aliases/default", alias_iface)
-            .await
-        {
-            warn!("Could not register aliases/default: {e}");
-        } else {
-            info!("[main] Registered aliases/default → {}", col_path_str);
-        }
-    }
+    // /aliases/default is NOT registered as a separate CollectionInterface.
+    // Doing so creates a duplicate struct with independent in-memory item_paths
+    // that diverges from the canonical collection after any CreateItem call.
+    // Instead, ReadAlias("default") in service.rs returns the canonical path
+    // and clients follow that path to the real CollectionInterface object.
+    info!("[main] default alias → {} (clients use ReadAlias)", default_alias.as_str());
 
     info!("mykey-secrets ready on org.freedesktop.secrets");
 
