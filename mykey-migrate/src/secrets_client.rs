@@ -628,17 +628,24 @@ pub fn list_provider_secrets() -> Result<Vec<(String, HashMap<String, String>)>,
 }
 
 /// Remove /etc/mykey/provider/info.json and the directory if it is then empty.
+///
+/// Uses `sudo rm` because /etc/mykey/ is root-owned.
 pub fn delete_provider_info() -> Result<(), String> {
     let path = std::path::Path::new(PROVIDER_DIR).join("info.json");
     if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|e| format!("Cannot remove {}: {e}", path.display()))?;
+        let status = std::process::Command::new("sudo")
+            .args(["rm", "-f", path.to_str().unwrap_or("/etc/mykey/provider/info.json")])
+            .status()
+            .map_err(|e| format!("Cannot run sudo rm: {e}"))?;
+        if !status.success() {
+            return Err(format!("sudo rm failed for {}", path.display()));
+        }
     }
-    // Remove the directory only if it is now empty.
-    let dir = std::path::Path::new(PROVIDER_DIR);
-    if dir.exists() {
-        std::fs::remove_dir(dir).ok();
-    }
+    // Remove the directory only if it is now empty (ignore failure — may still have aliases.json).
+    std::process::Command::new("sudo")
+        .args(["rmdir", "--ignore-fail-on-non-empty", PROVIDER_DIR])
+        .status()
+        .ok();
     Ok(())
 }
 

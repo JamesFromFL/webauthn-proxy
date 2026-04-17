@@ -552,10 +552,13 @@ fn run_unenroll() {
             println!("Phrase did not match. Cancelled.");
             return;
         }
-        // Delete MyKey secrets
+        // Delete MyKey secrets (/etc/mykey/ is root-owned; use sudo).
         println!();
         println!("Deleting MyKey secrets...");
-        let _ = std::fs::remove_dir_all("/etc/mykey/secrets");
+        std::process::Command::new("sudo")
+            .args(["rm", "-rf", "/etc/mykey/secrets"])
+            .status()
+            .ok();
         let _ = secrets_client::delete_provider_info();
         // Stop mykey-secrets
         let _ = std::process::Command::new("systemctl")
@@ -729,9 +732,15 @@ fn run_unenroll() {
     }
 
     // Step 13 — Clean up MyKey storage
+    // /etc/mykey/ is root-owned; use sudo for the removal.
     println!("Cleaning up MyKey storage...");
-    if let Err(e) = std::fs::remove_dir_all("/etc/mykey/secrets") {
-        eprintln!("✗ Could not remove /etc/mykey/secrets: {e}");
+    let rm_ok = std::process::Command::new("sudo")
+        .args(["rm", "-rf", "/etc/mykey/secrets"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !rm_ok {
+        eprintln!("✗ Could not remove /etc/mykey/secrets — try: sudo rm -rf /etc/mykey/secrets");
         std::process::exit(1);
     }
     println!("✓ /etc/mykey/secrets removed.");
