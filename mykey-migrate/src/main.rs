@@ -19,6 +19,68 @@ fn read_line() -> String {
     buf
 }
 
+// ---------------------------------------------------------------------------
+// Error-recovery helpers
+// ---------------------------------------------------------------------------
+
+/// Prompt the user to fix a problem, then verify it up to `max_attempts` times.
+///
+/// Prints `what_failed`, shows `user_instruction`, waits for Enter, then calls
+/// `check()`.  Returns `true` as soon as `check()` returns `true`.  Returns
+/// `false` (with a support link) if all attempts are exhausted.
+fn pause_and_retry<F>(
+    what_failed: &str,
+    user_instruction: &str,
+    check: F,
+    max_attempts: u32,
+) -> bool
+where
+    F: Fn() -> bool,
+{
+    println!();
+    println!("⚠ {what_failed}");
+    println!();
+    println!("Please open a new terminal and run:");
+    println!("  {user_instruction}");
+    println!();
+
+    for attempt in 1..=max_attempts {
+        print!("Press Enter when you have resolved the issue (attempt {attempt}/{max_attempts})...");
+        flush_stdout();
+        read_line();
+
+        if check() {
+            println!("✓ Issue resolved. Continuing...");
+            return true;
+        }
+
+        if attempt < max_attempts {
+            println!("✗ Issue not yet resolved. Please try again.");
+            println!("  {user_instruction}");
+        }
+    }
+
+    println!();
+    println!("✗ Could not resolve: {what_failed}");
+    println!("  The process cannot continue.");
+    println!();
+    println!("  If unable to resolve the issue, please submit an issue or discussion:");
+    println!("  GitHub:  https://github.com/JamesFromFL/mykey");
+    println!("  Discord: https://discord.gg/ANnzz4vQEe");
+    false
+}
+
+/// Print a fatal error with support links and exit.
+fn fatal_with_support(what_failed: &str) -> ! {
+    println!();
+    println!("✗ Fatal: {what_failed}");
+    println!();
+    println!("  If unable to resolve the issue, please submit an issue or discussion:");
+    println!("  GitHub:  https://github.com/JamesFromFL/mykey");
+    println!("  Discord: https://discord.gg/ANnzz4vQEe");
+    std::process::exit(1);
+}
+
 fn print_usage() {
     println!("MyKey Migration Tool");
     println!();
@@ -126,14 +188,14 @@ fn run_enroll_with_daemon(daemon: daemon_client::DaemonClient) {
                             match secrets_client::detect_provider() {
                                 Ok(info) => do_migration(info, daemon),
                                 Err(e) => {
-                                    eprintln!("Could not connect after starting provider: {e}");
-                                    std::process::exit(1);
+                                    fatal_with_support(&format!(
+                                        "Could not connect after starting provider: {e}"
+                                    ));
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to start {}: {e}", chosen);
-                            std::process::exit(1);
+                            fatal_with_support(&format!("Failed to start {}: {e}", chosen));
                         }
                     }
                 }
@@ -188,13 +250,17 @@ fn do_migration(
     );
     println!();
     println!("MyKey will:");
+    println!();
     println!("  • Copy your secrets and seal them with your TPM2 chip");
-    println!("  • Your original keychain will NOT be deleted (unless you choose to)");
+    println!();
     println!("  • All sealed secrets are verified before the old provider is stopped");
-    println!("  • This may take some time depending on the number of secrets — please be patient");
+    println!();
+    println!("  • This may take some time depending on the number of secrets - Please be patient");
+    println!();
+    println!("  • Your original keychain will NOT be deleted (unless you choose to)");
     println!();
     println!(
-        "⚠ Your previous Secret Service provider ({}) will be stopped and masked. \
+        "⚠ Your previous Secret Service provider ({}) will be removed and stopped. \
 You can restore it at any time by running: mykey-migrate --unenroll",
         info.process_name
     );
@@ -207,15 +273,14 @@ You can restore it at any time by running: mykey-migrate --unenroll",
         return;
     }
 
-    // Read secrets
+    // Read secrets — fatal if provider is unreachable
     println!();
     println!("Reading secrets from {}...", info.process_name);
     let items = match secrets_client::read_all_secrets() {
         Ok(i) => i,
-        Err(e) => {
-            eprintln!("Failed to read secrets: {e}");
-            std::process::exit(1);
-        }
+        Err(e) => fatal_with_support(&format!(
+            "Failed to read secrets from {}: {e}", info.process_name
+        )),
     };
     println!("Found {} secret(s) across collection(s).", items.len());
 
@@ -261,9 +326,10 @@ You can restore it at any time by running: mykey-migrate --unenroll",
         println!("  Failed:   {}", failed);
 
         if failed > 0 {
-            eprintln!("✗ Some secrets failed. Provider has NOT been stopped.");
-            eprintln!("  Fix the errors and run mykey-migrate --enroll again.");
-            std::process::exit(1);
+            fatal_with_support(&format!(
+                "{failed} secret(s) failed to seal or verify. Provider has NOT been stopped. \
+                 Check /tmp/mykey-daemon.log and run mykey-migrate --enroll again."
+            ));
         }
 
         // Save all to disk
@@ -291,28 +357,58 @@ You can restore it at any time by running: mykey-migrate --unenroll",
                 modified: item.modified,
             };
             if let Err(e) = storage::save_item(&stored) {
-                eprintln!("Failed to save {}: {e}", item.label);
+                fatal_with_support(&format!(
+                    "Failed to write secret '{}' to disk: {e}. \
+                     Check that /etc/mykey/secrets/ is accessible.",
+                    item.label
+                ));
             }
         }
     }
 
-    // Write provider info
+    // Write provider info — pause_and_retry on failure
     if let Err(e) = secrets_client::write_provider_info(&info) {
         eprintln!("⚠ Could not write provider info: {e}");
+        if !pause_and_retry(
+            "Could not write provider info to /etc/mykey/provider/",
+            "sudo mkdir -p /etc/mykey/provider && sudo chown $USER:$USER /etc/mykey/provider",
+            || secrets_client::write_provider_info(&info).is_ok(),
+            3,
+        ) {
+            fatal_with_support("Could not write provider info after multiple attempts.");
+        }
     }
 
-    // Stop old provider
+    // Stop old provider — two-stage pause_and_retry
     println!();
     println!("Stopping {}...", info.process_name);
-    if let Err(e) = secrets_client::stop_provider(&info) {
-        eprintln!("✗ Failed to stop provider: {e}");
-        eprintln!("  Cannot start mykey-secrets while old provider owns the bus.");
-        eprintln!("  Run mykey-migrate --enroll again to retry.");
-        std::process::exit(1);
+    if secrets_client::stop_provider(&info).is_err() {
+        let pkg_cmd = secrets_client::uninstall_cmd_hint(&info.package_name);
+
+        // Stage 1: ask user to uninstall the package
+        let resolved = pause_and_retry(
+            &format!("Could not uninstall {}", info.package_name),
+            &pkg_cmd,
+            || !secrets_client::ss_still_owned(),
+            3,
+        );
+
+        // Stage 2: if package uninstall didn't free the bus, try killing the process
+        if !resolved {
+            let resolved2 = pause_and_retry(
+                &format!("{} is still running", info.process_name),
+                &format!("pkill -f {}", info.process_name),
+                || !secrets_client::ss_still_owned(),
+                3,
+            );
+            if !resolved2 {
+                fatal_with_support(&format!("Could not stop {}", info.process_name));
+            }
+        }
     }
     println!("✓ {} stopped.", info.process_name);
 
-    // Install autostart entry so mykey-secrets launches on next login.
+    // Install autostart entry — warn only on failure
     match secrets_client::install_mykey_autostart() {
         Ok(_) => println!("✓ mykey-secrets autostart entry installed."),
         Err(e) => eprintln!("⚠ Could not install autostart entry: {e}"),
@@ -323,34 +419,38 @@ You can restore it at any time by running: mykey-migrate --unenroll",
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "enable", "mykey-secrets"])
         .status();
-    let start_ok = std::process::Command::new("systemctl")
+    let _ = std::process::Command::new("systemctl")
         .args(["--user", "start", "mykey-secrets"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !start_ok {
-        eprintln!("✗ mykey-secrets failed to start.");
-        eprintln!("  Check: journalctl --user -u mykey-secrets");
-        std::process::exit(1);
-    }
+        .status();
 
-    // Verify mykey-secrets is running and enabled
-    let is_active = std::process::Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", "mykey-secrets"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    let is_enabled = std::process::Command::new("systemctl")
+    let mykey_is_active = || {
+        std::process::Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", "mykey-secrets"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    let mykey_is_enabled = std::process::Command::new("systemctl")
         .args(["--user", "is-enabled", "--quiet", "mykey-secrets"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if !is_active || !is_enabled {
-        eprintln!(
-            "✗ mykey-secrets verification failed (active={is_active}, enabled={is_enabled})."
-        );
-        eprintln!("  Check: journalctl --user -u mykey-secrets");
-        std::process::exit(1);
+
+    if !mykey_is_active() || !mykey_is_enabled {
+        if !pause_and_retry(
+            "mykey-secrets failed to start",
+            "systemctl --user start mykey-secrets",
+            || {
+                std::process::Command::new("systemctl")
+                    .args(["--user", "is-active", "--quiet", "mykey-secrets"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            },
+            3,
+        ) {
+            fatal_with_support("mykey-secrets failed to start");
+        }
     }
     println!("✓ mykey-secrets is running and enabled.");
 
@@ -595,9 +695,16 @@ fn run_unenroll() {
 
     if !secrets_client::check_provider_installed(&target_provider) {
         println!("Installing {}...", package_name);
-        if let Err(e) = secrets_client::reinstall_provider(package_name) {
-            eprintln!("Failed to install {}: {e}", package_name);
-            std::process::exit(1);
+        if let Err(_) = secrets_client::reinstall_provider(package_name) {
+            let hint = secrets_client::install_cmd_hint(package_name);
+            if !pause_and_retry(
+                &format!("Could not install {package_name}"),
+                &hint,
+                || secrets_client::check_provider_installed(&target_provider),
+                3,
+            ) {
+                fatal_with_support(&format!("Could not install {package_name}"));
+            }
         }
         println!("✓ {} installed.", package_name);
     }
@@ -609,8 +716,14 @@ fn run_unenroll() {
         .status();
     std::thread::sleep(std::time::Duration::from_secs(2));
     if secrets_client::is_mykey_secrets_running() {
-        eprintln!("✗ mykey-secrets did not stop — cannot safely proceed.");
-        std::process::exit(1);
+        if !pause_and_retry(
+            "mykey-secrets did not stop",
+            "systemctl --user stop mykey-secrets",
+            || !secrets_client::is_mykey_secrets_running(),
+            3,
+        ) {
+            fatal_with_support("mykey-secrets did not stop");
+        }
     }
     println!("✓ mykey-secrets stopped.");
 
@@ -635,21 +748,30 @@ fn run_unenroll() {
         keychain_deleted: info.keychain_deleted,
     };
 
-    match secrets_client::start_provider(&tmp_info) {
-        Ok(_) => println!("✓ {} is running", target_provider),
-        Err(e) => {
-            eprintln!("Failed to start {}: {e}", target_provider);
-            eprintln!("Restarting mykey-secrets to restore access...");
+    if let Err(_) = secrets_client::start_provider(&tmp_info) {
+        let svc_hint = tmp_info.service_name.as_deref()
+            .map(|s| format!("systemctl --user start {s}"))
+            .unwrap_or_else(|| format!("{} &", target_provider));
+        if !pause_and_retry(
+            &format!("{target_provider} did not claim org.freedesktop.secrets"),
+            &svc_hint,
+            || secrets_client::ss_still_owned() && !secrets_client::is_mykey_secrets_running(),
+            3,
+        ) {
+            // Restart mykey-secrets to restore access before giving up
             let _ = std::process::Command::new("systemctl")
                 .args(["--user", "start", "mykey-secrets"])
                 .status();
-            std::process::exit(1);
+            fatal_with_support(&format!("Could not start {target_provider}"));
         }
     }
+    println!("✓ {} is running", target_provider);
 
-    // Step 9 — Unlock collection
+    // Step 9 — Unlock collection — warn only on failure
     println!("Unlocking keychain...");
-    let _ = secrets_client::unlock_default_collection();
+    if let Err(e) = secrets_client::unlock_default_collection() {
+        eprintln!("⚠ Could not unlock collection: {e} — some providers auto-unlock, continuing.");
+    }
 
     // Step 10 — Load MyKey secrets and restore
     let collections = storage::load_collections();
@@ -715,12 +837,14 @@ fn run_unenroll() {
     );
 
     if failed > 0 {
-        eprintln!("✗ Some secrets failed. MyKey storage NOT deleted.");
         eprintln!("  Restarting mykey-secrets...");
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "start", "mykey-secrets"])
             .status();
-        std::process::exit(1);
+        fatal_with_support(&format!(
+            "{failed} secret(s) failed to restore to {target_provider}. \
+             MyKey storage NOT deleted."
+        ));
     }
 
     // Step 12 — Ensure chosen provider is enabled for autostart
@@ -740,17 +864,31 @@ fn run_unenroll() {
         .map(|s| s.success())
         .unwrap_or(false);
     if !rm_ok {
-        eprintln!("✗ Could not remove /etc/mykey/secrets — try: sudo rm -rf /etc/mykey/secrets");
-        std::process::exit(1);
+        if !pause_and_retry(
+            "Could not remove /etc/mykey/secrets",
+            "sudo rm -rf /etc/mykey/secrets",
+            || !std::path::Path::new("/etc/mykey/secrets").exists(),
+            3,
+        ) {
+            fatal_with_support("Could not remove /etc/mykey/secrets");
+        }
     }
     println!("✓ /etc/mykey/secrets removed.");
+
     if let Err(e) = secrets_client::delete_provider_info() {
-        eprintln!("✗ Could not remove provider info: {e}");
-        std::process::exit(1);
+        eprintln!("⚠ Could not remove provider info: {e}");
+        if !pause_and_retry(
+            "Could not remove /etc/mykey/provider/info.json",
+            "sudo rm -f /etc/mykey/provider/info.json",
+            || !std::path::Path::new("/etc/mykey/provider/info.json").exists(),
+            3,
+        ) {
+            fatal_with_support("Could not remove /etc/mykey/provider/info.json");
+        }
     }
     println!("✓ Provider info removed.");
 
-    // Remove the mykey-secrets autostart entry.
+    // Remove the mykey-secrets autostart entry — warn only on failure
     match secrets_client::remove_mykey_autostart() {
         Ok(_) => println!("✓ mykey-secrets autostart entry removed."),
         Err(e) => eprintln!("⚠ Could not remove autostart entry: {e}"),

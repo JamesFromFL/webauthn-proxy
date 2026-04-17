@@ -748,6 +748,48 @@ fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Package manager command hints (for user-facing pause_and_retry messages)
+// ---------------------------------------------------------------------------
+
+/// Return the distro-appropriate package install command as a displayable string.
+pub fn install_cmd_hint(package_name: &str) -> String {
+    match detect_distro_id().as_deref() {
+        Some("arch") | Some("manjaro") => {
+            format!("sudo pacman -S --noconfirm {package_name}")
+        }
+        Some("ubuntu") | Some("debian") => {
+            format!("sudo apt-get install -y {package_name}")
+        }
+        Some("fedora") => {
+            format!("sudo dnf install -y {package_name}")
+        }
+        Some("opensuse") | Some("opensuse-leap") | Some("opensuse-tumbleweed") => {
+            format!("sudo zypper install -y {package_name}")
+        }
+        _ => format!("Install {package_name} using your system package manager"),
+    }
+}
+
+/// Return the distro-appropriate package removal command as a displayable string.
+pub fn uninstall_cmd_hint(package_name: &str) -> String {
+    match detect_distro_id().as_deref() {
+        Some("arch") | Some("manjaro") => {
+            format!("sudo pacman -Rns --noconfirm {package_name}")
+        }
+        Some("ubuntu") | Some("debian") => {
+            format!("sudo apt-get remove -y {package_name}")
+        }
+        Some("fedora") => {
+            format!("sudo dnf remove -y {package_name}")
+        }
+        Some("opensuse") | Some("opensuse-leap") | Some("opensuse-tumbleweed") => {
+            format!("sudo zypper remove -y {package_name}")
+        }
+        _ => format!("Uninstall {package_name} using your system package manager"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Autostart management
 // ---------------------------------------------------------------------------
 
