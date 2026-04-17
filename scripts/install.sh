@@ -552,10 +552,14 @@ HOST_BINARY="mykey-host"
 DAEMON_BINARY="mykey-daemon"
 TRAY_BINARY="mykey-tray"
 SECRETS_BINARY="mykey-secrets"
+PIN_BINARY="mykey-pin"
 HOST_DEST="/usr/local/bin/${HOST_BINARY}"
 DAEMON_DEST="/usr/local/bin/${DAEMON_BINARY}"
 TRAY_DEST="/usr/local/bin/${TRAY_BINARY}"
 SECRETS_DEST="/usr/local/bin/${SECRETS_BINARY}"
+PIN_DEST="/usr/local/bin/mykey-pin"
+PIN_SO_DEST="/usr/lib/security/mykeypin.so"
+PIN_DIR="/etc/mykey/pin"
 HOST_MANIFEST_SRC="${REPO_ROOT}/scripts/com.mykey.host.json"
 SYSTEMD_UNIT_SRC="${REPO_ROOT}/scripts/mykey-daemon.service"
 TRAY_SERVICE_SRC="${REPO_ROOT}/scripts/mykey-tray.service"
@@ -627,6 +631,7 @@ sudo chmod 755 "${WEBAUTHN_DIR}"
 sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/secrets"
 sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/secrets/default"
 sudo install -d -m 0700 -o "${REAL_USER}" "${WEBAUTHN_DIR}/provider"
+sudo install -d -m 0700 -o "${REAL_USER}" "${PIN_DIR}"
 # Restore /etc/mykey — 711 allows traversal by the real user without exposing listings
 sudo chmod 711 "${WEBAUTHN_DIR}"
 ok "Directories ready."
@@ -763,6 +768,23 @@ ok "Build complete: mykey-migrate"
 sudo install -m 0755 "${REPO_ROOT}/mykey-migrate/target/release/mykey-migrate" \
     "/usr/local/bin/mykey-migrate"
 ok "/usr/local/bin/mykey-migrate"
+
+# ── 4.21 Build mykey-pin ─────────────────────────────────────────────────
+echo ""
+info "Building mykey-pin (release)..."
+cd "${REPO_ROOT}/mykey-pin"
+RUSTFLAGS="-A warnings" "${CARGO}" build --release
+ok "Build complete: mykey-pin"
+
+# ── 4.22 Install mykey-pin binary ────────────────────────────────────────
+sudo install -m 0755 "${REPO_ROOT}/mykey-pin/target/release/mykey-pin" \
+    "${PIN_DEST}"
+ok "${PIN_DEST}"
+
+# ── 4.23 Install mykeypin.so PAM module ──────────────────────────────────
+sudo install -m 0755 "${REPO_ROOT}/mykey-pin/target/release/libmykeypin.so" \
+    "${PIN_SO_DEST}"
+ok "${PIN_SO_DEST}"
 
 # ════════════════════════════════════════════════════════════════════════════
 # PHASE 5 — SIGN BINARIES WITH SECURE BOOT KEYS
@@ -1081,7 +1103,7 @@ fi
 
 # [3/9] Binaries
 echo "[3/9] Binaries..."
-for bin in "${HOST_BINARY}" "${DAEMON_BINARY}" "${TRAY_BINARY}" "${SECRETS_BINARY}" "mykey-migrate"; do
+for bin in "${HOST_BINARY}" "${DAEMON_BINARY}" "${TRAY_BINARY}" "${SECRETS_BINARY}" "mykey-migrate" "${PIN_BINARY}"; do
     if [[ -x "/usr/local/bin/${bin}" ]]; then
         ok "/usr/local/bin/${bin}"
     else

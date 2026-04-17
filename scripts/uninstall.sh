@@ -46,6 +46,9 @@ sudo rm -f /usr/local/bin/mykey-daemon
 sudo rm -f /usr/local/bin/mykey-tray
 sudo rm -f /usr/local/bin/mykey-secrets
 sudo rm -f /usr/local/bin/mykey-migrate
+sudo rm -f /usr/local/bin/mykey-pin
+sudo rm -f /usr/lib/security/mykeypin.so
+sudo rm -rf /etc/mykey/pin
 sudo rm -f /etc/dbus-1/system.d/com.mykey.Daemon.conf
 sudo rm -f /etc/dbus-1/session.d/org.freedesktop.secrets.conf
 sudo rm -f /etc/sudoers.d/mykey
