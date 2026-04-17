@@ -42,25 +42,44 @@ pub struct ServiceInterface {
     sessions: Arc<Mutex<SessionStore>>,
     /// Object paths of all registered collections.
     collections: Vec<OwnedObjectPath>,
-    /// Object path that the "default" alias resolves to.
-    default_alias: OwnedObjectPath,
+    /// Named alias mappings (e.g. "default" → collection path).
+    aliases: HashMap<String, OwnedObjectPath>,
     /// Shared connection, populated after startup.  Used to register
-    /// SessionInterface objects when clients call OpenSession.
+    /// SessionInterface and CollectionInterface objects at runtime.
     pub conn: Arc<OnceLock<zbus::Connection>>,
 }
 
 impl ServiceInterface {
     pub fn new(
         collections: Vec<OwnedObjectPath>,
-        default_alias: OwnedObjectPath,
+        aliases: HashMap<String, OwnedObjectPath>,
         conn: Arc<OnceLock<zbus::Connection>>,
     ) -> Self {
         ServiceInterface {
             sessions: Arc::new(Mutex::new(SessionStore::new())),
             collections,
-            default_alias,
+            aliases,
             conn,
         }
+    }
+}
+
+/// Convert a human-readable label into a D-Bus-path-safe collection identifier.
+///
+/// Rules: lowercase; spaces become underscores; characters that are neither
+/// alphanumeric nor underscores are stripped.  Falls back to a UUID if the
+/// result would be empty.
+fn slugify(label: &str) -> String {
+    let slug: String = label
+        .to_lowercase()
+        .chars()
+        .map(|c| if c == ' ' { '_' } else { c })
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if slug.is_empty() {
+        uuid::Uuid::new_v4().to_string().replace('-', "_")
+    } else {
+        slug
     }
 }
 
@@ -73,6 +92,22 @@ impl ServiceInterface {
     fn collections(&self) -> Vec<OwnedObjectPath> {
         self.collections.clone()
     }
+
+    // ── Signals ──────────────────────────────────────────────────────────────
+
+    /// Emitted when a new collection is created.
+    #[zbus(signal)]
+    pub async fn collection_created(
+        ctxt: &zbus::SignalContext<'_>,
+        collection: OwnedObjectPath,
+    ) -> zbus::Result<()>;
+
+    /// Emitted when a collection is deleted.
+    #[zbus(signal)]
+    pub async fn collection_deleted(
+        ctxt: &zbus::SignalContext<'_>,
+        collection: OwnedObjectPath,
+    ) -> zbus::Result<()>;
 
     // ── OpenSession ──────────────────────────────────────────────────────────
 
@@ -258,19 +293,96 @@ impl ServiceInterface {
 
     /// Create a new collection.
     ///
-    /// Returns `(collection_path, prompt_path)`.  Prompt path is "/" (no
-    /// interactive prompt required).
+    /// Generates a slug from the label, persists collection metadata to disk,
+    /// registers a CollectionInterface on the object server, and emits
+    /// CollectionCreated.  Returns `(collection_path, prompt_path)`.
     async fn create_collection(
-        &self,
+        &mut self,
         properties: HashMap<String, OwnedValue>,
         alias: String,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), zbus::fdo::Error> {
-        let _ = (properties, alias);
-        info!("[service] CreateCollection (stub)");
-        let col_path = OwnedObjectPath::try_from(
-            "/org/freedesktop/secrets/collection/default"
-        )
-        .map_err(|e| zbus::fdo::Error::Failed(format!("Bad path: {e}")))?;
+        // Extract label from properties.
+        let label: String = properties
+            .get("org.freedesktop.Secret.Collection.Label")
+            .and_then(|v| {
+                if let Value::Str(s) = &**v {
+                    Some(s.as_str().to_owned())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        // Generate a D-Bus-path-safe collection ID.
+        let col_id = if label.is_empty() {
+            uuid::Uuid::new_v4().to_string().replace('-', "_")
+        } else {
+            slugify(&label)
+        };
+
+        info!("[service] CreateCollection label={label:?} id={col_id} alias={alias:?}");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Persist collection metadata to disk.
+        let stored = storage::StoredCollection {
+            id: col_id.clone(),
+            label: label.clone(),
+            created: now,
+            modified: now,
+        };
+        storage::save_collection(&stored)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Save collection: {e}")))?;
+
+        let col_path_str = format!("/org/freedesktop/secrets/collection/{col_id}");
+        let col_path = OwnedObjectPath::try_from(col_path_str.clone())
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Bad collection path: {e}")))?;
+
+        // Build and register the CollectionInterface.
+        let col_iface = crate::collection::CollectionInterface {
+            id: col_id.clone(),
+            label,
+            created: now,
+            modified: now,
+            item_paths: Vec::new(),
+            conn: Arc::clone(&self.conn),
+        };
+
+        let conn = self.conn.get().ok_or_else(|| {
+            zbus::fdo::Error::Failed("D-Bus connection not yet available".into())
+        })?;
+        conn.object_server()
+            .at(col_path_str, col_iface)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Register collection on D-Bus: {e}")))?;
+
+        self.collections.push(col_path.clone());
+
+        // Handle alias if provided.
+        if !alias.is_empty() {
+            self.aliases.insert(alias.clone(), col_path.clone());
+            let raw: HashMap<String, String> = self.aliases
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().to_owned()))
+                .collect();
+            if let Err(e) = storage::save_aliases(&raw) {
+                warn!("[service] CreateCollection: failed to persist alias {alias:?}: {e}");
+            }
+        }
+
+        // Emit CollectionCreated signal (best effort).
+        match zbus::SignalContext::new(conn, "/org/freedesktop/secrets") {
+            Ok(signal_ctxt) => {
+                if let Err(e) = ServiceInterface::collection_created(&signal_ctxt, col_path.clone()).await {
+                    warn!("[service] CollectionCreated signal failed: {e}");
+                }
+            }
+            Err(e) => warn!("[service] Could not build signal context for CollectionCreated: {e}"),
+        }
+
         let prompt_path = OwnedObjectPath::try_from("/").unwrap();
         Ok((col_path, prompt_path))
     }
@@ -279,23 +391,34 @@ impl ServiceInterface {
 
     /// Return the collection path that a named alias resolves to.
     ///
-    /// The "default" alias points to the primary collection (the one holding
-    /// migrated secrets).  All other alias names return "/" (not found).
+    /// Looks up the alias in the in-memory map (loaded from disk at startup
+    /// and kept up-to-date by SetAlias).  Returns "/" if not found.
     async fn read_alias(&self, name: String) -> OwnedObjectPath {
         info!("[service] ReadAlias name={name}");
-        if name == "default" {
-            self.default_alias.clone()
-        } else {
-            OwnedObjectPath::try_from("/").unwrap()
-        }
+        self.aliases
+            .get(&name)
+            .cloned()
+            .unwrap_or_else(|| OwnedObjectPath::try_from("/").unwrap())
     }
 
-    /// Set a named alias for a collection (stub — alias reassignment not supported).
+    /// Persist a named alias for a collection.
+    ///
+    /// Updates the in-memory map and writes the full alias table to
+    /// /etc/mykey/provider/aliases.json.
     async fn set_alias(
-        &self,
-        _name: String,
-        _collection: OwnedObjectPath,
+        &mut self,
+        name: String,
+        collection: OwnedObjectPath,
     ) -> Result<(), zbus::fdo::Error> {
+        info!("[service] SetAlias name={name} collection={}", collection.as_str());
+        self.aliases.insert(name, collection);
+        let raw: HashMap<String, String> = self.aliases
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().to_owned()))
+            .collect();
+        if let Err(e) = storage::save_aliases(&raw) {
+            warn!("[service] set_alias: failed to persist aliases: {e}");
+        }
         Ok(())
     }
 }

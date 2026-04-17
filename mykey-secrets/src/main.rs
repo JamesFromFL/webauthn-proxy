@@ -11,6 +11,7 @@ mod service;
 mod session;
 mod storage;
 
+use std::collections::HashMap;
 use std::process;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -84,22 +85,38 @@ async fn main() {
         })
         .collect();
 
-    // Determine which collection the "default" alias should resolve to.
-    // Prefer any non-default collection (those hold migrated secrets from a
-    // previous provider such as gnome-keyring's "Login" keyring).  Fall back
-    // to "default" if no other collection exists.
-    let default_alias_id = stored_cols
+    // Load persisted alias mappings and convert to OwnedObjectPath values.
+    let raw_aliases = storage::load_aliases();
+    let mut aliases: HashMap<String, OwnedObjectPath> = raw_aliases
         .iter()
-        .find(|c| c.id != "default")
-        .or_else(|| stored_cols.iter().find(|c| c.id == "default"))
-        .map(|c| c.id.as_str())
-        .unwrap_or("default");
-    let default_alias = OwnedObjectPath::try_from(format!(
-        "/org/freedesktop/secrets/collection/{default_alias_id}"
-    ))
-    .unwrap_or_else(|_| {
-        OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/default").unwrap()
-    });
+        .filter_map(|(k, v)| {
+            OwnedObjectPath::try_from(v.as_str()).ok().map(|p| (k.clone(), p))
+        })
+        .collect();
+
+    // Ensure the "default" alias is always populated.  If not on disk, apply
+    // the heuristic: prefer any non-default collection (migrated secrets), then
+    // fall back to the built-in "default" collection.
+    if !aliases.contains_key("default") {
+        let default_alias_id = stored_cols
+            .iter()
+            .find(|c| c.id != "default")
+            .or_else(|| stored_cols.iter().find(|c| c.id == "default"))
+            .map(|c| c.id.as_str())
+            .unwrap_or("default");
+        let default_alias = OwnedObjectPath::try_from(format!(
+            "/org/freedesktop/secrets/collection/{default_alias_id}"
+        ))
+        .unwrap_or_else(|_| {
+            OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/default").unwrap()
+        });
+        aliases.insert("default".to_string(), default_alias);
+    }
+
+    let default_alias = aliases.get("default").cloned()
+        .unwrap_or_else(|| {
+            OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/default").unwrap()
+        });
 
     info!(
         "[main] {} collection(s) found; default alias → {}",
@@ -107,7 +124,7 @@ async fn main() {
         default_alias.as_str()
     );
 
-    let svc = service::ServiceInterface::new(col_paths, default_alias.clone(), Arc::clone(&conn_cell));
+    let svc = service::ServiceInterface::new(col_paths, aliases, Arc::clone(&conn_cell));
 
     // Build the D-Bus connection.  Only the top-level ServiceInterface is
     // registered here; all collections and items are registered below after

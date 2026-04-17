@@ -63,18 +63,33 @@ impl ItemInterface {
             .map_err(|e| zbus::fdo::Error::Failed(format!("Delete failed: {e}")))?;
 
         // Unregister the D-Bus object so the path no longer responds after deletion.
-        // TODO: the parent CollectionInterface's item_paths Vec is not updated here;
-        //       the Items property on the collection will remain stale until restart.
         let safe_id = self.id.replace('-', "_");
-        let item_path = format!(
+        let item_path_str = format!(
             "/org/freedesktop/secrets/collection/{}/{}",
             self.collection_id, safe_id
         );
+        let item_path = OwnedObjectPath::try_from(item_path_str.as_str())
+            .unwrap_or_else(|_| OwnedObjectPath::try_from("/").unwrap());
+
         if let Some(conn) = self.conn.get() {
-            match conn.object_server().remove::<ItemInterface, _>(item_path.as_str()).await {
-                Ok(true) => info!("[item] Unregistered D-Bus object at {item_path}"),
-                Ok(false) => warn!("[item] D-Bus object not found at {item_path}"),
-                Err(e) => warn!("[item] Failed to unregister D-Bus object at {item_path}: {e}"),
+            match conn.object_server().remove::<ItemInterface, _>(item_path_str.as_str()).await {
+                Ok(true) => info!("[item] Unregistered D-Bus object at {item_path_str}"),
+                Ok(false) => warn!("[item] D-Bus object not found at {item_path_str}"),
+                Err(e) => warn!("[item] Failed to unregister D-Bus object at {item_path_str}: {e}"),
+            }
+
+            // Emit ItemDeleted signal on the parent collection (best effort).
+            let col_path = format!("/org/freedesktop/secrets/collection/{}", self.collection_id);
+            match zbus::SignalContext::new(conn, col_path.as_str()) {
+                Ok(signal_ctxt) => {
+                    if let Err(e) = crate::collection::CollectionInterface::item_deleted(
+                        &signal_ctxt,
+                        item_path,
+                    ).await {
+                        warn!("[item] ItemDeleted signal failed: {e}");
+                    }
+                }
+                Err(e) => warn!("[item] Could not build signal context for ItemDeleted: {e}"),
             }
         }
 
@@ -143,6 +158,29 @@ impl ItemInterface {
         };
         crate::storage::save_item(&stored)
             .map_err(|e| zbus::fdo::Error::Failed(format!("Save item: {e}")))?;
+
+        // Emit ItemChanged signal on the parent collection (best effort).
+        let safe_id = self.id.replace('-', "_");
+        let item_path = OwnedObjectPath::try_from(format!(
+            "/org/freedesktop/secrets/collection/{}/{}",
+            self.collection_id, safe_id
+        ))
+        .unwrap_or_else(|_| OwnedObjectPath::try_from("/").unwrap());
+        let col_path = format!("/org/freedesktop/secrets/collection/{}", self.collection_id);
+        if let Some(conn) = self.conn.get() {
+            match zbus::SignalContext::new(conn, col_path.as_str()) {
+                Ok(signal_ctxt) => {
+                    if let Err(e) = crate::collection::CollectionInterface::item_changed(
+                        &signal_ctxt,
+                        item_path,
+                    ).await {
+                        warn!("[item] ItemChanged signal failed: {e}");
+                    }
+                }
+                Err(e) => warn!("[item] Could not build signal context for ItemChanged: {e}"),
+            }
+        }
+
         Ok(())
     }
 }

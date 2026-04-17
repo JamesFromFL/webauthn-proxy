@@ -58,14 +58,85 @@ impl CollectionInterface {
 
     /// Emitted when a new item is created in this collection.
     #[zbus(signal)]
-    async fn item_created(ctxt: &zbus::SignalContext<'_>, item: OwnedObjectPath) -> zbus::Result<()>;
+    pub async fn item_created(ctxt: &zbus::SignalContext<'_>, item: OwnedObjectPath) -> zbus::Result<()>;
+
+    /// Emitted when an existing item's secret is updated.
+    #[zbus(signal)]
+    pub async fn item_changed(ctxt: &zbus::SignalContext<'_>, item: OwnedObjectPath) -> zbus::Result<()>;
+
+    /// Emitted when an item is deleted from this collection.
+    #[zbus(signal)]
+    pub async fn item_deleted(ctxt: &zbus::SignalContext<'_>, item: OwnedObjectPath) -> zbus::Result<()>;
 
     // ── Methods ──────────────────────────────────────────────────────────────
 
-    /// Delete the collection.  Returns empty prompt path (no prompt required).
+    /// Delete the collection and all of its items.
+    ///
+    /// Deletes every item from disk and unregisters its D-Bus object, removes
+    /// the collection directory, unregisters this collection's D-Bus object,
+    /// and emits CollectionDeleted on the Service interface.
+    /// Returns "/" (no prompt required).
     async fn delete(&self) -> Result<OwnedObjectPath, zbus::fdo::Error> {
         info!("[collection] Delete called for collection={}", self.id);
-        // Stub: deletion of whole collections is not yet implemented.
+
+        let conn = self.conn.get().ok_or_else(|| {
+            zbus::fdo::Error::Failed("D-Bus connection not yet available".into())
+        })?;
+
+        // Delete all items from disk and unregister their D-Bus objects.
+        let items = storage::load_items(&self.id);
+        for item in &items {
+            if let Err(e) = storage::delete_item(&self.id, &item.id) {
+                warn!("[collection] Delete: failed to remove item={} from disk: {e}", item.id);
+            }
+            let safe_id = item.id.replace('-', "_");
+            let item_path = format!(
+                "/org/freedesktop/secrets/collection/{}/{}",
+                self.id, safe_id
+            );
+            match conn.object_server()
+                .remove::<crate::item::ItemInterface, _>(item_path.as_str())
+                .await
+            {
+                Ok(true) => info!("[collection] Unregistered item D-Bus object at {item_path}"),
+                Ok(false) => warn!("[collection] Item D-Bus object not found at {item_path}"),
+                Err(e) => warn!("[collection] Failed to unregister item at {item_path}: {e}"),
+            }
+        }
+
+        // Delete the collection directory from disk.
+        if let Err(e) = storage::delete_collection_dir(&self.id) {
+            warn!("[collection] Delete: failed to remove collection dir: {e}");
+        }
+
+        // Build the collection path before unregistering (needed for the signal).
+        let col_path_str = format!("/org/freedesktop/secrets/collection/{}", self.id);
+        let col_path = OwnedObjectPath::try_from(col_path_str.as_str())
+            .unwrap_or_else(|_| OwnedObjectPath::try_from("/").unwrap());
+
+        // Unregister this collection's D-Bus object.
+        match conn.object_server()
+            .remove::<CollectionInterface, _>(col_path_str.as_str())
+            .await
+        {
+            Ok(true) => info!("[collection] Unregistered collection D-Bus object at {col_path_str}"),
+            Ok(false) => warn!("[collection] Collection D-Bus object not found at {col_path_str}"),
+            Err(e) => warn!("[collection] Failed to unregister collection at {col_path_str}: {e}"),
+        }
+
+        // Emit CollectionDeleted on the Service interface (best effort).
+        match zbus::SignalContext::new(conn, "/org/freedesktop/secrets") {
+            Ok(signal_ctxt) => {
+                if let Err(e) = crate::service::ServiceInterface::collection_deleted(
+                    &signal_ctxt,
+                    col_path,
+                ).await {
+                    warn!("[collection] CollectionDeleted signal failed: {e}");
+                }
+            }
+            Err(e) => warn!("[collection] Could not build signal context for CollectionDeleted: {e}"),
+        }
+
         Ok(OwnedObjectPath::try_from("/").unwrap())
     }
 
