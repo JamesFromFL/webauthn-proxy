@@ -679,39 +679,57 @@ fn stop_keepassxc() -> Result<(), String> {
     Ok(())
 }
 
-/// Stop a provider via systemd (service + socket), pkill, then uninstall it.
+/// Stop a provider by uninstalling its package, then killing any surviving
+/// process, and verifying the bus name is released.
 fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
-    let run = |args: &[&str]| {
-        std::process::Command::new(args[0])
-            .args(&args[1..])
-            .status()
-            .ok();
+    // Step 1 — Uninstall the package first.
+    // The process continues even if the package removal fails.
+    let id = detect_distro_id();
+    let uninstall_cmd: Option<Vec<&str>> = match id.as_deref() {
+        Some("arch") | Some("manjaro") => Some(vec![
+            "sudo", "pacman", "-Rns", "--noconfirm", info.package_name.as_str(),
+        ]),
+        Some("ubuntu") | Some("debian") => Some(vec![
+            "sudo", "apt-get", "remove", "-y", info.package_name.as_str(),
+        ]),
+        Some("fedora") => Some(vec![
+            "sudo", "dnf", "remove", "-y", info.package_name.as_str(),
+        ]),
+        Some("opensuse") | Some("opensuse-leap") | Some("opensuse-tumbleweed") => Some(vec![
+            "sudo", "zypper", "remove", "-y", info.package_name.as_str(),
+        ]),
+        other => {
+            eprintln!("[warn] Unknown distro {other:?} — skipping package uninstall");
+            None
+        }
     };
 
-    // Step 1 — systemd: stop, disable, and mask the service and its companion socket.
-    // Masking prevents socket activation or autostart from reviving the provider
-    // (uninstalling often fails due to package dependencies, so masking is safer).
-    if let Some(svc) = &info.service_name {
-        run(&["systemctl", "--user", "stop", svc.as_str()]);
-        run(&["systemctl", "--user", "disable", svc.as_str()]);
-        run(&["systemctl", "--user", "mask", svc.as_str()]);
-
-        // Socket unit: replace ".service" with ".socket" and do the same.
-        // Harmless if the socket unit does not exist.
-        let socket = svc.replace(".service", ".socket");
-        run(&["systemctl", "--user", "stop", socket.as_str()]);
-        run(&["systemctl", "--user", "disable", socket.as_str()]);
-        run(&["systemctl", "--user", "mask", socket.as_str()]);
+    if let Some(cmd) = uninstall_cmd {
+        match std::process::Command::new(cmd[0]).args(&cmd[1..]).status() {
+            Ok(s) if s.success() => {
+                eprintln!("[info] Package {} removed.", info.package_name);
+            }
+            Ok(s) => {
+                eprintln!(
+                    "[warn] Package removal for {} exited with {s} — continuing.",
+                    info.package_name
+                );
+            }
+            Err(e) => {
+                eprintln!("[warn] Failed to run package manager: {e} — continuing.");
+            }
+        }
     }
 
-    // Step 2 — pkill as fallback (covers D-Bus-activated providers with no
-    // systemd unit, and catches any process the service stop missed).
-    run(&["pkill", "-f", info.process_name.as_str()]);
-
-    // Step 3 — give the process time to exit.
+    // Step 2 — Kill the process; it stays alive after package removal.
+    std::process::Command::new("pkill")
+        .args(["-f", info.process_name.as_str()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok();
     std::thread::sleep(Duration::from_secs(2));
 
-    // Step 4 — verify the bus name has been released.
+    // Step 3 — Verify the bus name has been released.
     if ss_still_owned() {
         Err(format!(
             "Could not stop {} — org.freedesktop.secrets is still owned",
@@ -722,40 +740,43 @@ fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
     }
 }
 
-/// Uninstall a package using the system package manager detected from
-/// /etc/os-release.  Errors are non-fatal to the caller.
-fn uninstall_provider(package_name: &str) -> Result<(), String> {
-    let id = detect_distro_id();
-    let cmd: Vec<&str> = match id.as_deref() {
-        Some("arch") | Some("manjaro") => {
-            vec!["sudo", "pacman", "-Rns", "--noconfirm", package_name]
-        }
-        Some("ubuntu") | Some("debian") => {
-            vec!["sudo", "apt-get", "remove", "-y", package_name]
-        }
-        Some("fedora") => {
-            vec!["sudo", "dnf", "remove", "-y", package_name]
-        }
-        Some("opensuse") | Some("opensuse-leap") | Some("opensuse-tumbleweed") => {
-            vec!["sudo", "zypper", "remove", "-y", package_name]
-        }
-        other => {
-            return Err(format!(
-                "Unknown distro '{other:?}' — cannot detect package manager"
-            ));
-        }
-    };
+// ---------------------------------------------------------------------------
+// Autostart management
+// ---------------------------------------------------------------------------
 
-    let status = std::process::Command::new(cmd[0])
-        .args(&cmd[1..])
-        .status()
-        .map_err(|e| format!("Failed to run package manager: {e}"))?;
+/// Install a XDG autostart entry so mykey-secrets launches on login.
+///
+/// Creates `~/.config/autostart/mykey-secrets.desktop`, creating the
+/// `~/.config/autostart/` directory if it does not exist.
+pub fn install_mykey_autostart() -> Result<(), String> {
+    let home = std::env::var("HOME")
+        .map_err(|_| "HOME environment variable not set".to_string())?;
+    let autostart_dir = std::path::Path::new(&home).join(".config/autostart");
+    std::fs::create_dir_all(&autostart_dir)
+        .map_err(|e| format!("Cannot create {}: {e}", autostart_dir.display()))?;
+    let desktop_path = autostart_dir.join("mykey-secrets.desktop");
+    let content = "[Desktop Entry]\n\
+                   Type=Application\n\
+                   Name=MyKey Secrets\n\
+                   Comment=MyKey TPM2-backed Secret Service provider\n\
+                   Exec=/usr/local/bin/mykey-secrets\n\
+                   Hidden=false\n\
+                   NoDisplay=true\n";
+    std::fs::write(&desktop_path, content)
+        .map_err(|e| format!("Cannot write {}: {e}", desktop_path.display()))
+}
 
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("Package manager exited with status {status}"))
+/// Remove the XDG autostart entry for mykey-secrets, if it exists.
+pub fn remove_mykey_autostart() -> Result<(), String> {
+    let home = std::env::var("HOME")
+        .map_err(|_| "HOME environment variable not set".to_string())?;
+    let desktop_path = std::path::Path::new(&home)
+        .join(".config/autostart/mykey-secrets.desktop");
+    if desktop_path.exists() {
+        std::fs::remove_file(&desktop_path)
+            .map_err(|e| format!("Cannot remove {}: {e}", desktop_path.display()))?;
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -312,6 +312,12 @@ You can restore it at any time by running: mykey-migrate --unenroll",
     }
     println!("✓ {} stopped.", info.process_name);
 
+    // Install autostart entry so mykey-secrets launches on next login.
+    match secrets_client::install_mykey_autostart() {
+        Ok(_) => println!("✓ mykey-secrets autostart entry installed."),
+        Err(e) => eprintln!("⚠ Could not install autostart entry: {e}"),
+    }
+
     // Enable and start mykey-secrets
     println!("Enabling and starting mykey-secrets...");
     let _ = std::process::Command::new("systemctl")
@@ -734,6 +740,13 @@ fn run_unenroll() {
         std::process::exit(1);
     }
     println!("✓ Provider info removed.");
+
+    // Remove the mykey-secrets autostart entry.
+    match secrets_client::remove_mykey_autostart() {
+        Ok(_) => println!("✓ mykey-secrets autostart entry removed."),
+        Err(e) => eprintln!("⚠ Could not remove autostart entry: {e}"),
+    }
+
     println!();
     println!(
         "✓ Unenroll complete. {} is now your Secret Service provider.",
