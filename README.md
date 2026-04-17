@@ -144,7 +144,7 @@ If you discover a security issue, please report it responsibly.
 
 ### ✅ Complete
 
-- WebAuthn authentication via Chromium extension (`mykey-proxy`)  
+- WebAuthn authentication via Chromium extension 
 - Native host (`mykey-host`), daemon (`mykey-daemon`), and system tray (`mykey-tray`) architecture  
 - Encrypted IPC (AES-256-GCM + HMAC + replay protection)  
 - TPM2 key sealing with PCR 0+7 binding
@@ -153,30 +153,32 @@ If you discover a security issue, please report it responsibly.
 - Hardened systemd service  
 - Secure Boot validation at startup  
 - Bidirectional Secret Service provider migration (`mykey-migrate`)
+- Secret Service API (`mykey-secrets`) 
 
 ---
 
 ### 🚧 In Progress
 
-- GTK4 Desktop Manager (`mykey-manager`)  
-- Secret Service API (`mykey-secrets`)  
+- GTK4 Desktop Manager (`mykey-manager`)
+- PAM PIN module (`mykeypin.so`)
 
 ---
 
 ### 📦 Planned (Near Term)
 
-- Firefox extension support (`mykey-proxy`)  
-- Chrome Web Store & Firefox Add-ons submission  
+- Chrome Web Store submission for (`mykey-proxy`)
 - AUR package  
 
 ---
 
 ### 🚀 Future
 
-- PAM PIN module (`mykeypin.so`)
+- Firefox extension support (`mykey-proxy`) **
+- Firefox Add-ons submission 
 - Flatpak distribution  
 - Mobile companion app  
 
+> ** Firefox does not currently support the platform authenticator proxy API required for WebAuthn integration. Firefox support is on hold until Mozilla implements this capability.
 ---
 
 ## 📥 Installation
