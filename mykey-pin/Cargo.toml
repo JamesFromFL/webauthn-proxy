@@ -1,0 +1,29 @@
+[package]
+name = "mykey-pin"
+version = "0.1.0"
+edition = "2021"
+description = "MyKey PIN authentication — PAM module and CLI management tool"
+license = "MIT"
+
+[[bin]]
+name = "mykey-pin"
+path = "src/main.rs"
+
+[lib]
+name = "mykeypin"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+pam = { version = "0.8", features = ["module"] }
+sha2 = "0.10"
+zbus = { version = "4", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+zeroize = { version = "1", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+libc = "0.2"
+rpassword = "7"
