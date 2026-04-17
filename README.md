@@ -144,7 +144,7 @@ If you discover a security issue, please report it responsibly.
 
 ### ✅ Complete
 
-- WebAuthn authentication via Chromium extension 
+- WebAuthn authentication via Chromium extension (`mykey-proxy`)
 - Native host (`mykey-host`), daemon (`mykey-daemon`), and system tray (`mykey-tray`) architecture  
 - Encrypted IPC (AES-256-GCM + HMAC + replay protection)  
 - TPM2 key sealing with PCR 0+7 binding
@@ -173,8 +173,8 @@ If you discover a security issue, please report it responsibly.
 
 ### 🚀 Future
 
-- Firefox extension support (`mykey-proxy`) **
-- Firefox Add-ons submission 
+- WebAuthn authentication via Firefox extension (`mykey-proxy`) **
+- Firefox Add-ons submission (Pending Firefox support)
 - Flatpak distribution  
 - Mobile companion app  
 
