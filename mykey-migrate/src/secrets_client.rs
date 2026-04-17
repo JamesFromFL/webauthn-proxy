@@ -509,45 +509,26 @@ pub fn start_provider(info: &ProviderInfoFile) -> Result<(), String> {
 
 /// Unlock the default Secret Service collection.
 ///
-/// Calls `Unlock()` on the service with the default alias path.  If the provider
-/// returns a prompt path (i.e. the collection is locked), the prompt dialog is
-/// invoked and we wait 3 seconds for the user to respond.  Always returns `Ok(())`
-/// after the attempt — the caller should treat failures as non-fatal warnings.
+/// Calls `Unlock(["/org/freedesktop/secrets/aliases/default"])` on the Service.
+/// If a prompt path is returned the prompt is invoked and the call sleeps 3 s
+/// to give the user time to interact with the desktop dialog.
 pub fn unlock_default_collection() -> Result<(), String> {
     let conn = session_bus()?;
     let svc = service_proxy(&conn)?;
 
-    let default_col = OwnedObjectPath::try_from("/org/freedesktop/secrets/aliases/default")
-        .map_err(|e| format!("Invalid object path: {e}"))?;
+    const DEFAULT_ALIAS: &str = "/org/freedesktop/secrets/aliases/default";
 
-    let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = svc
-        .call("Unlock", &(vec![default_col],))
+    let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = svc
+        .call("Unlock", &(vec![OwnedObjectPath::try_from(DEFAULT_ALIAS).unwrap()],))
         .map_err(|e| format!("Unlock call failed: {e}"))?;
 
-    eprintln!(
-        "[info] Unlock: {} object(s) already unlocked, prompt={}",
-        unlocked.len(),
-        prompt.as_str()
-    );
-
     if prompt.as_str() != "/" {
-        eprintln!("[info] Prompt required at {}; invoking...", prompt.as_str());
-        let prompt_proxy = Proxy::new(
-            &conn,
-            SS_DEST,
-            prompt.as_str(),
-            "org.freedesktop.Secret.Prompt",
-        )
-        .map_err(|e| format!("Prompt proxy failed: {e}"))?;
-
+        let prompt_proxy = Proxy::new(&conn, SS_DEST, prompt.as_str(), "org.freedesktop.Secret.Prompt")
+            .map_err(|e| format!("Prompt proxy failed: {e}"))?;
         let _: () = prompt_proxy
             .call("Prompt", &("",))
             .map_err(|e| format!("Prompt invocation failed: {e}"))?;
-
         std::thread::sleep(Duration::from_secs(3));
-        eprintln!("[info] Waited 3 seconds for unlock prompt response.");
-    } else {
-        eprintln!("[info] Collection already unlocked — no prompt needed.");
     }
 
     Ok(())
@@ -555,8 +536,12 @@ pub fn unlock_default_collection() -> Result<(), String> {
 
 /// Write a single secret into the running Secret Service provider.
 ///
-/// Uses the default collection alias.  Replaces any existing item with the same
-/// attributes (`replace: true`).
+/// Provider-agnostic flow:
+/// 1. Open a plain session via `OpenSession`.
+/// 2. Call `ReadAlias("default")` to get the collection path.
+/// 3. If `"/"` is returned, fall back to `GetCollections` and take the first
+///    non-session collection.
+/// 4. Call `CreateItem` on that path with `replace=true`.
 pub fn write_secret_to_provider(
     label: &str,
     attributes: &HashMap<String, String>,
@@ -566,15 +551,30 @@ pub fn write_secret_to_provider(
     let conn = session_bus()?;
     let svc = service_proxy(&conn)?;
 
+    // 1. Open a plain (unencrypted) session — the session bus is local and trusted.
     let (_, session_path): (OwnedValue, OwnedObjectPath) = svc
         .call("OpenSession", &("plain", Value::from("")))
         .map_err(|e| format!("OpenSession failed: {e}"))?;
 
-    let default_col = "/org/freedesktop/secrets/aliases/default";
-    let col_proxy = Proxy::new(&conn, SS_DEST, default_col, COL_IFACE)
-        .map_err(|e| format!("Collection proxy failed: {e}"))?;
+    // 2. Resolve the collection path via ReadAlias.
+    let alias_path: OwnedObjectPath = svc
+        .call("ReadAlias", &("default",))
+        .map_err(|e| format!("ReadAlias(\"default\") failed: {e}"))?;
 
-    // Properties dict: a{sv}
+    let col_path = if alias_path.as_str() != "/" {
+        alias_path
+    } else {
+        // 3. Alias not set — fall back to the first non-session collection.
+        let cols = get_object_paths_prop(&conn, SS_PATH, SS_IFACE, "Collections")?;
+        cols.into_iter()
+            .find(|p| !p.as_str().ends_with("/session"))
+            .ok_or_else(|| "No Secret Service collection found".to_string())?
+    };
+
+    // 4. Call CreateItem on the real collection path with replace=true.
+    let col_proxy = Proxy::new(&conn, SS_DEST, col_path.as_str(), COL_IFACE)
+        .map_err(|e| format!("Collection proxy for {} failed: {e}", col_path.as_str()))?;
+
     let mut props: HashMap<&str, Value<'_>> = HashMap::new();
     props.insert("org.freedesktop.Secret.Item.Label", Value::from(label));
     props.insert(
@@ -587,7 +587,7 @@ pub fn write_secret_to_provider(
 
     let _: (OwnedObjectPath, OwnedObjectPath) = col_proxy
         .call("CreateItem", &(&props, &secret, true))
-        .map_err(|e| format!("CreateItem failed: {e}"))?;
+        .map_err(|e| format!("CreateItem on {} failed: {e}", col_path.as_str()))?;
 
     Ok(())
 }

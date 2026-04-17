@@ -767,11 +767,14 @@ fn run_unenroll() {
     }
     println!("✓ {} is running", target_provider);
 
-    // Step 9 — Unlock collection — warn only on failure
-    println!("Unlocking keychain...");
+    // Step 9 — Unlock the collection and wait for the user.
+    std::thread::sleep(std::time::Duration::from_secs(3));
     if let Err(e) = secrets_client::unlock_default_collection() {
         eprintln!("⚠ Could not unlock collection: {e} — some providers auto-unlock, continuing.");
     }
+    println!("Please unlock your keychain if prompted, then press Enter...");
+    flush_stdout();
+    read_line();
 
     // Step 10 — Load MyKey secrets and restore
     let collections = storage::load_collections();
