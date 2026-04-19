@@ -238,6 +238,83 @@ fn run_enroll_with_daemon(daemon: daemon_client::DaemonClient) {
     }
 }
 
+fn detected_provider_to_file(
+    info: &secrets_client::ProviderInfo,
+) -> secrets_client::ProviderInfoFile {
+    secrets_client::ProviderInfoFile {
+        process_name: info.process_name.clone(),
+        service_name: info.service_name.clone(),
+        package_name: info.package_name.clone(),
+        keychain_path: info.keychain_path.clone(),
+        keychain_deleted: false,
+    }
+}
+
+fn restart_previous_provider(info: &secrets_client::ProviderInfo) {
+    match secrets_client::start_provider(&detected_provider_to_file(info)) {
+        Ok(_) => eprintln!("✓ {} restarted after enroll rollback.", info.process_name),
+        Err(e) => eprintln!(
+            "⚠ Could not restart {} after enroll rollback: {e}",
+            info.process_name
+        ),
+    }
+}
+
+fn rollback_enroll_takeover(
+    info: &secrets_client::ProviderInfo,
+    activated_storage: Option<storage::ActivatedStorage>,
+) {
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "stop", "mykey-secrets"])
+        .status();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "mykey-secrets"])
+        .status();
+
+    if let Some(activated_storage) = activated_storage {
+        if let Err(e) = activated_storage.rollback() {
+            eprintln!("⚠ Could not restore previous MyKey storage after rollback: {e}");
+        }
+    }
+
+    restart_previous_provider(info);
+}
+
+fn stage_migrated_storage(
+    collections: &[storage::StoredCollection],
+    items: &[storage::StoredItem],
+) -> Result<storage::StagedStorage, String> {
+    let stage = storage::StagedStorage::new()?;
+
+    for collection in collections {
+        if let Err(e) = stage.save_collection(collection) {
+            let msg = format!(
+                "Failed to stage collection '{}' to disk: {e}",
+                collection.label
+            );
+            return Err(match stage.discard() {
+                Ok(_) => msg,
+                Err(cleanup) => format!("{msg}. Cleanup also failed: {cleanup}"),
+            });
+        }
+    }
+
+    for item in items {
+        if let Err(e) = stage.save_item(item) {
+            let msg = format!(
+                "Failed to stage secret '{}' to disk: {e}",
+                item.label
+            );
+            return Err(match stage.discard() {
+                Ok(_) => msg,
+                Err(cleanup) => format!("{msg}. Cleanup also failed: {cleanup}"),
+            });
+        }
+    }
+
+    Ok(stage)
+}
+
 fn do_migration(
     info: secrets_client::ProviderInfo,
     daemon: daemon_client::DaemonClient,
@@ -283,6 +360,9 @@ You can restore it at any time by running: mykey-migrate --unenroll",
         )),
     };
     println!("Found {} secret(s) across collection(s).", items.len());
+
+    let mut stored_collections = Vec::new();
+    let mut stored_items = Vec::new();
 
     if items.is_empty() {
         println!("Nothing to migrate.");
@@ -332,52 +412,38 @@ You can restore it at any time by running: mykey-migrate --unenroll",
             ));
         }
 
-        // Save all to disk
         let mut collections_created: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        for (item, sealed) in &sealed_items {
-            if !collections_created.contains(&item.collection_id) {
-                let col = storage::StoredCollection {
+        for (item, sealed) in sealed_items {
+            if collections_created.insert(item.collection_id.clone()) {
+                stored_collections.push(storage::StoredCollection {
                     id: item.collection_id.clone(),
                     label: item.collection_label.clone(),
                     created: item.created,
                     modified: item.modified,
-                };
-                let _ = storage::save_collection(&col);
-                collections_created.insert(item.collection_id.clone());
+                });
             }
-            let stored = storage::StoredItem {
+            stored_items.push(storage::StoredItem {
                 id: uuid::Uuid::new_v4().to_string(),
                 collection_id: item.collection_id.clone(),
                 label: item.label.clone(),
                 attributes: item.attributes.clone(),
-                sealed_value: sealed.clone(),
+                sealed_value: sealed,
                 content_type: item.content_type.clone(),
                 created: item.created,
                 modified: item.modified,
-            };
-            if let Err(e) = storage::save_item(&stored) {
-                fatal_with_support(&format!(
-                    "Failed to write secret '{}' to disk: {e}. \
-                     Check that /etc/mykey/secrets/ is accessible.",
-                    item.label
-                ));
-            }
+            });
         }
     }
 
-    // Write provider info — pause_and_retry on failure
-    if let Err(e) = secrets_client::write_provider_info(&info) {
-        eprintln!("⚠ Could not write provider info: {e}");
-        if !pause_and_retry(
-            "Could not write provider info to /etc/mykey/provider/",
-            "sudo mkdir -p /etc/mykey/provider && sudo chown $USER:$USER /etc/mykey/provider",
-            || secrets_client::write_provider_info(&info).is_ok(),
-            3,
-        ) {
-            fatal_with_support("Could not write provider info after multiple attempts.");
+    let staged_storage = match stage_migrated_storage(&stored_collections, &stored_items) {
+        Ok(stage) => stage,
+        Err(e) => {
+            fatal_with_support(&format!(
+                "{e}. Check that /etc/mykey/secrets/ is accessible."
+            ));
         }
-    }
+    };
 
     // Stop old provider without uninstalling its package. Migration should
     // manage runtime ownership of org.freedesktop.secrets, not remove software.
@@ -398,10 +464,21 @@ You can restore it at any time by running: mykey-migrate --unenroll",
             || !secrets_client::ss_still_owned(),
             3,
         ) {
+            let _ = staged_storage.discard();
             fatal_with_support(&format!("Could not stop {}", info.process_name));
         }
     }
     println!("✓ {} stopped.", info.process_name);
+
+    let activated_storage = match staged_storage.activate() {
+        Ok(activated_storage) => activated_storage,
+        Err(e) => {
+            restart_previous_provider(&info);
+            fatal_with_support(&format!(
+                "Could not activate staged MyKey storage: {e}"
+            ));
+        }
+    };
 
     // Enable and start mykey-secrets
     println!("Enabling and starting mykey-secrets...");
@@ -412,36 +489,50 @@ You can restore it at any time by running: mykey-migrate --unenroll",
         .args(["--user", "start", "mykey-secrets"])
         .status();
 
-    let mykey_is_active = || {
-        std::process::Command::new("systemctl")
+    let mykey_ready = || {
+        let mykey_is_active = std::process::Command::new("systemctl")
             .args(["--user", "is-active", "--quiet", "mykey-secrets"])
             .status()
             .map(|s| s.success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        let mykey_is_enabled = std::process::Command::new("systemctl")
+            .args(["--user", "is-enabled", "--quiet", "mykey-secrets"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        mykey_is_active && mykey_is_enabled && secrets_client::is_mykey_secrets_running()
     };
-    let mykey_is_enabled = std::process::Command::new("systemctl")
-        .args(["--user", "is-enabled", "--quiet", "mykey-secrets"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
 
-    if !mykey_is_active() || !mykey_is_enabled {
+    if !mykey_ready() {
         if !pause_and_retry(
-            "mykey-secrets failed to start",
+            "mykey-secrets failed to start and claim org.freedesktop.secrets",
             "systemctl --user start mykey-secrets",
-            || {
-                std::process::Command::new("systemctl")
-                    .args(["--user", "is-active", "--quiet", "mykey-secrets"])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            },
+            mykey_ready,
             3,
         ) {
+            rollback_enroll_takeover(&info, Some(activated_storage));
             fatal_with_support("mykey-secrets failed to start");
         }
     }
     println!("✓ mykey-secrets is running and enabled.");
+
+    // Write provider info only after takeover is fully confirmed.
+    if let Err(e) = secrets_client::write_provider_info(&info) {
+        eprintln!("⚠ Could not write provider info: {e}");
+        if !pause_and_retry(
+            "Could not write provider info to /etc/mykey/provider/",
+            "sudo mkdir -p /etc/mykey/provider && sudo chown $USER:$USER /etc/mykey/provider",
+            || secrets_client::write_provider_info(&info).is_ok(),
+            3,
+        ) {
+            rollback_enroll_takeover(&info, Some(activated_storage));
+            fatal_with_support("Could not write provider info after multiple attempts.");
+        }
+    }
+
+    if let Err(e) = activated_storage.commit() {
+        eprintln!("⚠ Could not remove previous MyKey storage backup: {e}");
+    }
 
     // Optional keychain deletion (after mykey-secrets is confirmed running)
     if let Some(ref kpath) = info.keychain_path {

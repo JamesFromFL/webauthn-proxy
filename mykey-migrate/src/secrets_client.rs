@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::time::Duration;
+use sha2::{Digest, Sha256};
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zeroize::Zeroize;
@@ -177,14 +178,10 @@ fn get_attributes(conn: &Connection, item_path: &str) -> Result<HashMap<String, 
         .map_err(|e| format!("Attributes on {item_path} is not dict<string,string>: {e}"))
 }
 
-/// Slugify a label: lowercase, spaces → hyphens, strip non-alphanumeric except hyphens.
-fn slugify(label: &str) -> String {
-    label
-        .to_lowercase()
-        .chars()
-        .map(|c| if c == ' ' { '-' } else { c })
-        .filter(|c| c.is_alphanumeric() || *c == '-')
-        .collect()
+fn stable_collection_id(path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(path.as_bytes());
+    format!("collection-{}", hex::encode(hasher.finalize()))
 }
 
 /// Return true if something currently owns `org.freedesktop.secrets` on the session bus.
@@ -497,6 +494,7 @@ pub fn read_all_secrets() -> Result<Vec<MigratedItem>, String> {
 
     let col_paths = get_object_paths_prop(&conn, SS_PATH, SS_IFACE, "Collections")?;
     let mut items = Vec::new();
+    let mut errors = Vec::new();
 
     for col_path in &col_paths {
         let col_str = col_path.as_str();
@@ -506,20 +504,38 @@ pub fn read_all_secrets() -> Result<Vec<MigratedItem>, String> {
 
         let col_label = match get_string_prop(&conn, col_str, COL_IFACE, "Label") {
             Ok(l) => l,
-            Err(_) => continue,
+            Err(e) => {
+                errors.push(format!("Cannot read collection label for {col_str}: {e}"));
+                continue;
+            }
         };
-        let collection_id = slugify(&col_label);
+        let collection_id = stable_collection_id(col_str);
 
         let item_paths = match get_object_paths_prop(&conn, col_str, COL_IFACE, "Items") {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(e) => {
+                errors.push(format!("Cannot list items for collection {col_str}: {e}"));
+                continue;
+            }
         };
 
         for item_path in &item_paths {
             let item_str = item_path.as_str();
 
-            let label = get_string_prop(&conn, item_str, ITEM_IFACE, "Label").unwrap_or_default();
-            let attributes = get_attributes(&conn, item_str).unwrap_or_default();
+            let label = match get_string_prop(&conn, item_str, ITEM_IFACE, "Label") {
+                Ok(label) => label,
+                Err(e) => {
+                    errors.push(format!("Cannot read item label for {item_str}: {e}"));
+                    continue;
+                }
+            };
+            let attributes = match get_attributes(&conn, item_str) {
+                Ok(attributes) => attributes,
+                Err(e) => {
+                    errors.push(format!("Cannot read attributes for {item_str}: {e}"));
+                    continue;
+                }
+            };
             let created = get_u64_prop(&conn, item_str, ITEM_IFACE, "Created").unwrap_or(0);
             let modified = get_u64_prop(&conn, item_str, ITEM_IFACE, "Modified").unwrap_or(0);
 
@@ -531,7 +547,7 @@ pub fn read_all_secrets() -> Result<Vec<MigratedItem>, String> {
                 match item_proxy.call("GetSecret", &(&session_path,)) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("  [warn] GetSecret failed for {item_str}: {e}");
+                        errors.push(format!("GetSecret failed for {item_str}: {e}"));
                         continue;
                     }
                 };
@@ -551,14 +567,29 @@ pub fn read_all_secrets() -> Result<Vec<MigratedItem>, String> {
         }
     }
 
+    if !errors.is_empty() {
+        let sample: Vec<String> = errors.iter().take(3).cloned().collect();
+        let mut msg = format!(
+            "Failed to read a complete source secret set. {} read error(s) occurred",
+            errors.len()
+        );
+        if !sample.is_empty() {
+            msg.push_str(&format!(": {}", sample.join("; ")));
+        }
+        if errors.len() > sample.len() {
+            msg.push_str(&format!("; and {} more", errors.len() - sample.len()));
+        }
+        return Err(msg);
+    }
+
     Ok(items)
 }
 
 /// Stop the detected Secret Service provider so MyKey can take over.
 ///
-/// KeePassXC requires interactive user confirmation and is NOT uninstalled.
-/// All other providers are stopped via systemd (service + socket units),
-/// pkill, and then uninstalled via the system package manager.
+/// KeePassXC requires interactive user confirmation.
+/// All other providers are stopped via systemd (service + socket units)
+/// and pkill.
 ///
 /// Only called after all secrets have been successfully migrated and verified.
 pub fn stop_provider(info: &ProviderInfo) -> Result<(), String> {
