@@ -239,7 +239,7 @@ fn provider_kind(process_name: &str) -> ProviderKind {
     let lower = process_name.to_lowercase();
     if lower.contains("gnome-keyring") {
         ProviderKind::GnomeKeyring
-    } else if lower.contains("kwalletd") || lower.contains("kwallet") {
+    } else if lower.contains("kwalletd") || lower.contains("kwallet") || lower.contains("ksecretd") {
         ProviderKind::KWallet
     } else if lower.contains("keepassxc") {
         ProviderKind::KeepassXC
@@ -398,7 +398,7 @@ fn keychain_path_for(process_name: &str) -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     if lower.contains("gnome-keyring") {
         Some(format!("{home}/.local/share/keyrings/"))
-    } else if lower.contains("kwallet") {
+    } else if lower.contains("kwallet") || lower.contains("ksecretd") {
         Some(format!("{home}/.local/share/kwalletd/"))
     } else {
         None
@@ -410,6 +410,8 @@ fn package_name_for(process_name: &str) -> String {
     let lower = process_name.to_lowercase();
     if lower.contains("gnome-keyring") {
         "gnome-keyring".to_string()
+    } else if lower.contains("ksecretd") {
+        "kwallet6".to_string()
     } else if lower.contains("kwalletd5") {
         "kwallet".to_string()
     } else if lower.contains("kwalletd6") || lower.contains("kwalletd") {
@@ -687,27 +689,23 @@ fn user_systemctl(args: &[&str]) {
     std::process::Command::new("systemctl")
         .args(["--user"])
         .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .ok();
+}
+
+fn dbus_ping(conn: &Connection, dest: &str, path: &str) -> bool {
+    Proxy::new(conn, dest, path, "org.freedesktop.DBus.Peer")
+        .and_then(|proxy| proxy.call::<_, _, ()>("Ping", &()))
+        .is_ok()
 }
 
 pub fn provider_ready(info: &ProviderInfoFile) -> bool {
     match provider_kind(&info.process_name) {
         ProviderKind::GnomeKeyring => bus_owner_matches("gnome-keyring-daemon"),
-        ProviderKind::KWallet => {
-            let conn = match session_bus() {
-                Ok(conn) => conn,
-                Err(_) => return false,
-            };
-            bus_owner_matches("kwalletd") && !list_live_non_session_collections(&conn).is_empty()
-        }
-        ProviderKind::KeepassXC => {
-            let conn = match session_bus() {
-                Ok(conn) => conn,
-                Err(_) => return false,
-            };
-            bus_owner_matches("keepassxc") && !list_live_non_session_collections(&conn).is_empty()
-        }
+        ProviderKind::KWallet => bus_owner_matches("ksecretd") || bus_owner_matches("kwalletd"),
+        ProviderKind::KeepassXC => bus_owner_matches("keepassxc"),
         ProviderKind::Generic => bus_owner_matches(&info.process_name),
     }
 }
@@ -729,31 +727,61 @@ pub fn start_provider(info: &ProviderInfoFile) -> Result<(), String> {
             user_systemctl(&["restart", "gnome-keyring-daemon.service"]);
         }
         ProviderKind::KWallet => {
-            let service_candidates = [
-                info.service_name.as_deref(),
-                Some("plasma-kwalletd.service"),
-                Some("kwalletd6.service"),
-                Some("kwalletd5.service"),
-            ];
-            for svc in service_candidates.into_iter().flatten() {
-                let socket = svc.replace(".service", ".socket");
-                user_systemctl(&["reset-failed", &socket]);
-                user_systemctl(&["reset-failed", svc]);
-                user_systemctl(&["unmask", &socket]);
-                user_systemctl(&["unmask", svc]);
-                user_systemctl(&["enable", &socket]);
-                user_systemctl(&["enable", svc]);
-                user_systemctl(&["restart", &socket]);
-                user_systemctl(&["restart", svc]);
+            let conn = session_bus().ok();
+            if let Some(conn) = conn.as_ref() {
+                let _ = dbus_ping(conn, "org.kde.kwalletd6", "/modules/kwalletd6");
+                let _ = dbus_ping(conn, "org.kde.secretservicecompat", "/");
+            }
+
+            let mut spawned = false;
+            if !spawned {
+                let service_candidates = [
+                    info.service_name.as_deref(),
+                    Some("plasma-kwalletd.service"),
+                    Some("kwalletd6.service"),
+                    Some("kwalletd5.service"),
+                ];
+                for svc in service_candidates.into_iter().flatten() {
+                    let socket = svc.replace(".service", ".socket");
+                    user_systemctl(&["reset-failed", &socket]);
+                    user_systemctl(&["reset-failed", svc]);
+                    user_systemctl(&["unmask", &socket]);
+                    user_systemctl(&["unmask", svc]);
+                    user_systemctl(&["enable", &socket]);
+                    user_systemctl(&["enable", svc]);
+                    user_systemctl(&["restart", &socket]);
+                    user_systemctl(&["restart", svc]);
+                }
+            }
+
+            if !spawned && check_provider_installed(&info.process_name) {
+                if std::process::Command::new(&info.process_name).spawn().is_ok() {
+                    spawned = true;
+                }
+            }
+
+            if !spawned && check_provider_installed("kwalletd6") {
+                std::process::Command::new("kwalletd6").spawn().ok();
             }
         }
         ProviderKind::KeepassXC => {
             std::process::Command::new("keepassxc").spawn().ok();
             println!("KeePassXC requires manual setup:");
             println!("1. Open KeePassXC");
-            println!("2. Enable Secret Service integration in settings");
+            println!(
+                "2. Enable Tools -> Settings -> Secret Service Integration -> Enable KeePassXC Freedesktop.org Secret Service Integration"
+            );
             println!("3. Open or create a database");
-            println!("4. Expose a group via Secret Service");
+            println!(
+                "4. In Database -> Database Settings -> Secret Service Integration, expose a group"
+            );
+            if let Some(exec) = secret_service_activation_exec() {
+                if !exec.contains("keepassxc") {
+                    println!(
+                        "5. If another provider keeps taking org.freedesktop.secrets, create ~/.local/share/dbus-1/services/org.freedesktop.secrets.service with Exec=/usr/bin/keepassxc"
+                    );
+                }
+            }
         }
         ProviderKind::Generic => {
             if let Some(svc) = &info.service_name {
@@ -784,10 +812,14 @@ pub fn start_provider(info: &ProviderInfoFile) -> Result<(), String> {
         }
     }
 
-    Err(format!(
-        "{} did not become ready for Secret Service restore",
-        info.process_name
-    ))
+    if kind == ProviderKind::KeepassXC {
+        Err(keepassxc_startup_error())
+    } else {
+        Err(format!(
+            "{} did not become ready for Secret Service restore",
+            info.process_name
+        ))
+    }
 }
 
 fn create_item_on_collection(
@@ -1243,12 +1275,12 @@ fn ensure_unlocked_col(conn: &Connection, path: OwnedObjectPath) -> Result<Owned
 fn supports_collection_creation(kind: ProviderKind) -> bool {
     matches!(
         kind,
-        ProviderKind::GnomeKeyring | ProviderKind::KWallet | ProviderKind::Generic
+        ProviderKind::GnomeKeyring | ProviderKind::Generic
     )
 }
 
 fn supports_multi_collection(kind: ProviderKind) -> bool {
-    matches!(kind, ProviderKind::GnomeKeyring | ProviderKind::KWallet)
+    matches!(kind, ProviderKind::GnomeKeyring)
 }
 
 fn default_collection_label(kind: ProviderKind) -> &'static str {
@@ -1258,6 +1290,67 @@ fn default_collection_label(kind: ProviderKind) -> &'static str {
         ProviderKind::KeepassXC => "Secret Service",
         ProviderKind::Generic => "login",
     }
+}
+
+fn kwallet_wallet_ready_error() -> String {
+    "KWallet Secret Service compatibility is running, but no wallet is open or exported. \
+Open or create the KDE wallet (usually 'kdewallet') in KDE Wallet Manager or from a KDE password prompt, unlock it, then run mykey-migrate --unenroll again."
+        .to_string()
+}
+
+fn secret_service_activation_exec() -> Option<String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(format!(
+            "{home}/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+        ));
+    }
+    candidates.push("/usr/local/share/dbus-1/services/org.freedesktop.secrets.service".to_string());
+    candidates.push("/usr/share/dbus-1/services/org.freedesktop.secrets.service".to_string());
+
+    for path in candidates {
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        for line in content.lines() {
+            if let Some(exec) = line.strip_prefix("Exec=") {
+                return Some(exec.trim().to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn keepassxc_startup_error() -> String {
+    let mut msg = "KeePassXC did not become the active Secret Service provider. \
+Open KeePassXC, enable Tools -> Settings -> Secret Service Integration -> Enable KeePassXC Freedesktop.org Secret Service Integration, open or create a database, then in Database -> Database Settings -> Secret Service Integration expose a group."
+        .to_string();
+
+    match secret_service_activation_exec() {
+        Some(exec) if exec.contains("keepassxc") => {}
+        Some(exec) => {
+            msg.push_str(&format!(
+                " Your current org.freedesktop.secrets D-Bus activation command is '{exec}'. \
+If another provider keeps starting instead of KeePassXC, create ~/.local/share/dbus-1/services/org.freedesktop.secrets.service with:\n[D-BUS Service]\nName=org.freedesktop.secrets\nExec=/usr/bin/keepassxc"
+            ));
+        }
+        None => {
+            msg.push_str(
+                " If another provider keeps starting instead of KeePassXC, create ~/.local/share/dbus-1/services/org.freedesktop.secrets.service with:\n[D-BUS Service]\nName=org.freedesktop.secrets\nExec=/usr/bin/keepassxc",
+            );
+        }
+    }
+
+    msg.push_str(" Then run mykey-migrate --unenroll again.");
+    msg
+}
+
+fn keepassxc_ready_error() -> String {
+    "KeePassXC Secret Service integration is not ready. Open KeePassXC, enable Tools -> Settings -> Secret Service Integration -> Enable KeePassXC Freedesktop.org Secret Service Integration, open or create a database, then in Database -> Database Settings -> Secret Service Integration expose a group and run mykey-migrate --unenroll again."
+        .to_string()
 }
 
 /// Call `CreateCollection` and handle the Prompt, returning the live collection path.
@@ -1318,6 +1411,14 @@ fn resolve_or_create_collection(
         if let Some(path) = list_live_non_session_collections(conn).into_iter().next() {
             return ensure_unlocked_col(conn, path);
         }
+    }
+
+    if kind == ProviderKind::KWallet {
+        return Err(kwallet_wallet_ready_error());
+    }
+
+    if kind == ProviderKind::KeepassXC {
+        return Err(keepassxc_ready_error());
     }
 
     if !supports_collection_creation(kind) {
@@ -1447,6 +1548,12 @@ pub fn find_installed_providers() -> Vec<String> {
 /// Start a provider by friendly name and wait up to 10 seconds for it to claim
 /// `org.freedesktop.secrets`.  KeePassXC is interactive.
 pub fn start_provider_by_name(name: &str) -> Result<(), String> {
+    let kwallet_process = if check_provider_installed("ksecretd") {
+        "ksecretd"
+    } else {
+        "kwalletd6"
+    };
+
     let info = match name {
         "gnome-keyring" => ProviderInfoFile {
             process_name: "gnome-keyring-daemon".to_string(),
@@ -1456,14 +1563,18 @@ pub fn start_provider_by_name(name: &str) -> Result<(), String> {
             keychain_deleted: false,
         },
         "kwalletd6" => ProviderInfoFile {
-            process_name: "kwalletd6".to_string(),
+            process_name: kwallet_process.to_string(),
             service_name: Some("plasma-kwalletd.service".to_string()),
             package_name: "kwallet6".to_string(),
             keychain_path: None,
             keychain_deleted: false,
         },
         "kwalletd5" => ProviderInfoFile {
-            process_name: "kwalletd5".to_string(),
+            process_name: if check_provider_installed("ksecretd") {
+                "ksecretd".to_string()
+            } else {
+                "kwalletd5".to_string()
+            },
             service_name: Some("kwalletd5.service".to_string()),
             package_name: "kwallet".to_string(),
             keychain_path: None,

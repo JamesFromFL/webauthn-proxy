@@ -964,8 +964,17 @@ fn run_unenroll() {
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "enable", svc.as_str()])
             .status();
+        println!("✓ {} enabled to start automatically.", target_provider);
+    } else if tmp_info.process_name.eq_ignore_ascii_case("keepassxc") {
+        println!(
+            "✓ KeePassXC restore completed. If you want D-Bus activation without launching the app first, create ~/.local/share/dbus-1/services/org.freedesktop.secrets.service with Exec=/usr/bin/keepassxc."
+        );
+    } else {
+        println!(
+            "✓ {} restore completed. Ensure this provider starts automatically in your session if needed.",
+            target_provider
+        );
     }
-    println!("✓ {} enabled to start automatically.", target_provider);
 
     // Step 14 — Clean up MyKey storage
     // /etc/mykey/ is root-owned; use sudo for the removal.
