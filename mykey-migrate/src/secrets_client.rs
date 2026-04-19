@@ -479,6 +479,20 @@ pub fn reinstall_provider(package_name: &str) -> Result<(), String> {
 /// Uses systemd if a service name is known; otherwise spawns the binary directly.
 pub fn start_provider(info: &ProviderInfoFile) -> Result<(), String> {
     if let Some(svc) = &info.service_name {
+        // Propagate display environment into the systemd user manager so that
+        // services started here (e.g. gnome-keyring-daemon) can spawn graphical
+        // helpers like gcr-prompter with the correct display context.
+        std::process::Command::new("dbus-update-activation-environment")
+            .args([
+                "--systemd",
+                "DISPLAY",
+                "WAYLAND_DISPLAY",
+                "XDG_RUNTIME_DIR",
+                "XDG_CURRENT_DESKTOP",
+                "DBUS_SESSION_BUS_ADDRESS",
+            ])
+            .status()
+            .ok();
         std::process::Command::new("systemctl")
             .args(["--user", "start", svc.as_str()])
             .status()
@@ -507,42 +521,13 @@ pub fn start_provider(info: &ProviderInfoFile) -> Result<(), String> {
     ))
 }
 
-/// Unlock the default Secret Service collection.
+/// Write a single secret into a Secret Service collection.
 ///
-/// Calls `Unlock(["/org/freedesktop/secrets/aliases/default"])` on the Service.
-/// If a prompt path is returned the prompt is invoked and the call sleeps 3 s
-/// to give the user time to interact with the desktop dialog.
-pub fn unlock_default_collection() -> Result<(), String> {
-    let conn = session_bus()?;
-    let svc = service_proxy(&conn)?;
-
-    const DEFAULT_ALIAS: &str = "/org/freedesktop/secrets/aliases/default";
-
-    let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = svc
-        .call("Unlock", &(vec![OwnedObjectPath::try_from(DEFAULT_ALIAS).unwrap()],))
-        .map_err(|e| format!("Unlock call failed: {e}"))?;
-
-    if prompt.as_str() != "/" {
-        let prompt_proxy = Proxy::new(&conn, SS_DEST, prompt.as_str(), "org.freedesktop.Secret.Prompt")
-            .map_err(|e| format!("Prompt proxy failed: {e}"))?;
-        let _: () = prompt_proxy
-            .call("Prompt", &("",))
-            .map_err(|e| format!("Prompt invocation failed: {e}"))?;
-        std::thread::sleep(Duration::from_secs(3));
-    }
-
-    Ok(())
-}
-
-/// Write a single secret into the running Secret Service provider.
-///
-/// Provider-agnostic flow:
-/// 1. Open a plain session via `OpenSession`.
-/// 2. Call `ReadAlias("default")` to get the collection path.
-/// 3. If `"/"` is returned, fall back to `GetCollections` and take the first
-///    non-session collection.
-/// 4. Call `CreateItem` on that path with `replace=true`.
+/// `collection_path` must be a live, unlocked collection obtained from
+/// `prepare_collection()`.  Opens a plain session (the session bus is local
+/// and trusted) and calls `CreateItem` with `replace=true`.
 pub fn write_secret_to_provider(
+    collection_path: &OwnedObjectPath,
     label: &str,
     attributes: &HashMap<String, String>,
     value: &[u8],
@@ -551,29 +536,12 @@ pub fn write_secret_to_provider(
     let conn = session_bus()?;
     let svc = service_proxy(&conn)?;
 
-    // 1. Open a plain (unencrypted) session — the session bus is local and trusted.
     let (_, session_path): (OwnedValue, OwnedObjectPath) = svc
         .call("OpenSession", &("plain", Value::from("")))
         .map_err(|e| format!("OpenSession failed: {e}"))?;
 
-    // 2. Resolve the collection path via ReadAlias.
-    let alias_path: OwnedObjectPath = svc
-        .call("ReadAlias", &("default",))
-        .map_err(|e| format!("ReadAlias(\"default\") failed: {e}"))?;
-
-    let col_path = if alias_path.as_str() != "/" {
-        alias_path
-    } else {
-        // 3. Alias not set — fall back to the first non-session collection.
-        let cols = get_object_paths_prop(&conn, SS_PATH, SS_IFACE, "Collections")?;
-        cols.into_iter()
-            .find(|p| !p.as_str().ends_with("/session"))
-            .ok_or_else(|| "No Secret Service collection found".to_string())?
-    };
-
-    // 4. Call CreateItem on the real collection path with replace=true.
-    let col_proxy = Proxy::new(&conn, SS_DEST, col_path.as_str(), COL_IFACE)
-        .map_err(|e| format!("Collection proxy for {} failed: {e}", col_path.as_str()))?;
+    let col_proxy = Proxy::new(&conn, SS_DEST, collection_path.as_str(), COL_IFACE)
+        .map_err(|e| format!("Collection proxy failed: {e}"))?;
 
     let mut props: HashMap<&str, Value<'_>> = HashMap::new();
     props.insert("org.freedesktop.Secret.Item.Label", Value::from(label));
@@ -582,12 +550,11 @@ pub fn write_secret_to_provider(
         Value::from(attributes.clone()),
     );
 
-    // Secret struct: (session_path, parameters, value, content_type)
     let secret = (&session_path, Vec::<u8>::new(), value.to_vec(), content_type);
 
     let _: (OwnedObjectPath, OwnedObjectPath) = col_proxy
         .call("CreateItem", &(&props, &secret, true))
-        .map_err(|e| format!("CreateItem on {} failed: {e}", col_path.as_str()))?;
+        .map_err(|e| format!("CreateItem failed: {e}"))?;
 
     Ok(())
 }
@@ -829,8 +796,200 @@ pub fn remove_mykey_autostart() -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// New helpers for enriched enroll/unenroll flows
+// prepare_collection — spec-correct collection setup for unenroll
 // ---------------------------------------------------------------------------
+
+/// Return true if the collection at `path` is currently locked.
+///
+/// Reads the `Locked` property from the `org.freedesktop.Secret.Collection`
+/// interface.  Returns `true` on any D-Bus error (conservative default).
+fn is_col_locked(conn: &Connection, path: &str) -> bool {
+    let proxy = match props_proxy(conn, path) {
+        Ok(p) => p,
+        Err(_) => return true,
+    };
+    let val: Result<OwnedValue, _> = proxy.call("Get", &(COL_IFACE, "Locked"));
+    match val {
+        Ok(v) => bool::try_from(v).unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+/// Invoke a Secret Service Prompt and block until `Prompt.Completed` fires.
+///
+/// Spawns a thread that subscribes to the `Completed` signal on a dedicated
+/// D-Bus connection (so the match rule is active before `Prompt.Prompt` is
+/// called, eliminating any race window), then calls `Prompt.Prompt("")` on the
+/// caller's connection and waits up to 60 seconds for the result.
+///
+/// Returns `Err` if the user dismissed the prompt or the timeout expires.
+fn invoke_prompt_and_wait(conn: &Connection, prompt_path: &str) -> Result<OwnedValue, String> {
+    use std::sync::mpsc;
+
+    let prompt_path_owned = prompt_path.to_string();
+    let (result_tx, result_rx) = mpsc::channel::<Result<OwnedValue, String>>();
+    let (ready_tx, ready_rx) = mpsc::channel::<()>();
+
+    std::thread::spawn(move || {
+        let result: Result<OwnedValue, String> = (|| {
+            let conn2 = Connection::session()
+                .map_err(|e| format!("Session bus for signal: {e}"))?;
+            let proxy = Proxy::new(
+                &conn2,
+                SS_DEST,
+                prompt_path_owned.as_str(),
+                "org.freedesktop.Secret.Prompt",
+            )
+            .map_err(|e| format!("Prompt signal proxy: {e}"))?;
+
+            let mut iter = proxy
+                .receive_signal("Completed")
+                .map_err(|e| format!("Cannot subscribe to Prompt.Completed: {e}"))?;
+
+            ready_tx.send(()).ok(); // match rule is now active on conn2
+
+            match iter.next() {
+                Some(msg) => {
+                    let (dismissed, result): (bool, OwnedValue) = msg
+                        .body()
+                        .deserialize()
+                        .map_err(|e| format!("Completed body: {e}"))?;
+                    if dismissed {
+                        Err("Prompt was dismissed by the user.".to_string())
+                    } else {
+                        Ok(result)
+                    }
+                }
+                None => Err("Prompt.Completed stream ended unexpectedly".to_string()),
+            }
+        })();
+        result_tx.send(result).ok();
+    });
+
+    // Wait for subscription to be established (or thread failure within 5 s).
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(()) => {}
+        Err(_) => {
+            return result_rx
+                .recv_timeout(Duration::from_millis(200))
+                .unwrap_or(Err("Cannot subscribe to Prompt.Completed".to_string()));
+        }
+    }
+
+    // Invoke the prompt on the caller's connection.
+    let prompt_proxy = Proxy::new(conn, SS_DEST, prompt_path, "org.freedesktop.Secret.Prompt")
+        .map_err(|e| format!("Prompt proxy: {e}"))?;
+    let _: () = prompt_proxy
+        .call("Prompt", &("0",))
+        .map_err(|e| format!("Prompt.Prompt: {e}"))?;
+
+    // Block until Prompt.Completed arrives (60-second timeout for user interaction).
+    result_rx
+        .recv_timeout(Duration::from_secs(60))
+        .map_err(|_| {
+            "Timed out waiting for keychain dialog (60 s). \
+             Run mykey-migrate --unenroll again."
+                .to_string()
+        })?
+}
+
+/// Ensure a collection is unlocked, invoking a Prompt if the provider requires one.
+fn ensure_unlocked_col(conn: &Connection, path: OwnedObjectPath) -> Result<OwnedObjectPath, String> {
+    if !is_col_locked(conn, path.as_str()) {
+        return Ok(path);
+    }
+
+    let svc = service_proxy(conn)?;
+    let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = svc
+        .call("Unlock", &(vec![path.clone()],))
+        .map_err(|e| format!("Unlock failed: {e}"))?;
+
+    // prompt == "/" means Unlock succeeded immediately — no dialog needed.
+    // Only invoke the prompt flow when the provider explicitly requests one.
+    if prompt.as_str() == "/" {
+        return Ok(path);
+    }
+
+    println!("  (If a dialog appears, please complete it — this will continue automatically.)");
+    invoke_prompt_and_wait(conn, prompt.as_str())?;
+
+    if is_col_locked(conn, path.as_str()) {
+        Err(format!(
+            "Collection {} is still locked after Unlock",
+            path.as_str()
+        ))
+    } else {
+        Ok(path)
+    }
+}
+
+/// Call `CreateCollection` and handle the Prompt, returning the new collection path.
+fn create_and_get_collection(conn: &Connection) -> Result<OwnedObjectPath, String> {
+    let svc = service_proxy(conn)?;
+    let mut props: HashMap<&str, Value<'_>> = HashMap::new();
+    props.insert(
+        "org.freedesktop.Secret.Collection.Label",
+        Value::from("login"),
+    );
+
+    let (col_path, prompt): (OwnedObjectPath, OwnedObjectPath) = svc
+        .call("CreateCollection", &(&props, "default"))
+        .map_err(|e| format!("CreateCollection failed: {e}"))?;
+
+    if col_path.as_str() != "/" {
+        return Ok(col_path);
+    }
+    if prompt.as_str() == "/" {
+        return Err(
+            "CreateCollection returned neither a collection nor a prompt. \
+             Try creating the keychain manually (e.g. via Passwords and Keys / seahorse)."
+                .to_string(),
+        );
+    }
+
+    println!("  (If a dialog appears, please complete it — this will continue automatically.)");
+    let result = invoke_prompt_and_wait(conn, prompt.as_str())?;
+
+    OwnedObjectPath::try_from(result)
+        .map_err(|_| "CreateCollection Completed result is not an ObjectPath".to_string())
+}
+
+/// Ensure there is a live, unlocked Secret Service collection and return its path.
+///
+/// Provider-agnostic flow per the Secret Service specification:
+/// 1. Try `ReadAlias("default")` — if valid and non-session, ensure it is unlocked.
+/// 2. Scan `GetCollections` for any non-session collection and unlock it.
+/// 3. If no collection exists at all, call `CreateCollection` to create one,
+///    handle the resulting Prompt, and return the new collection path.
+///
+/// Prompts are invoked via `invoke_prompt_and_wait`, which subscribes to
+/// `Prompt.Completed` before calling `Prompt.Prompt` so the signal is never
+/// missed, then blocks until the dialog completes (up to 60 seconds).
+pub fn prepare_collection() -> Result<OwnedObjectPath, String> {
+    let conn = session_bus()?;
+    let svc = service_proxy(&conn)?;
+
+    // 1. Try the default alias.
+    let alias: OwnedObjectPath = svc
+        .call("ReadAlias", &("default",))
+        .map_err(|e| format!("ReadAlias failed: {e}"))?;
+
+    if alias.as_str() != "/" && !alias.as_str().ends_with("/session") {
+        return ensure_unlocked_col(&conn, alias);
+    }
+
+    // 2. Scan GetCollections.
+    let cols = get_object_paths_prop(&conn, SS_PATH, SS_IFACE, "Collections")?;
+    if let Some(col) = cols
+        .into_iter()
+        .find(|p| !p.as_str().ends_with("/session"))
+    {
+        return ensure_unlocked_col(&conn, col);
+    }
+
+    // 3. No collection exists — create one.
+    create_and_get_collection(&conn)
+}
 
 /// Return true if `org.freedesktop.secrets` is currently owned by mykey-secrets.
 pub fn is_mykey_secrets_running() -> bool {

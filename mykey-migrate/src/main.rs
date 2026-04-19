@@ -714,7 +714,6 @@ fn run_unenroll() {
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "stop", "mykey-secrets"])
         .status();
-    std::thread::sleep(std::time::Duration::from_secs(2));
     if secrets_client::is_mykey_secrets_running() {
         if !pause_and_retry(
             "mykey-secrets did not stop",
@@ -767,14 +766,20 @@ fn run_unenroll() {
     }
     println!("✓ {} is running", target_provider);
 
-    // Step 9 — Unlock the collection and wait for the user.
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    if let Err(e) = secrets_client::unlock_default_collection() {
-        eprintln!("⚠ Could not unlock collection: {e} — some providers auto-unlock, continuing.");
-    }
-    println!("Please unlock your keychain if prompted, then press Enter...");
-    flush_stdout();
-    read_line();
+    // Step 9 — Prepare the Secret Service collection (unlock existing or create new).
+    println!();
+    println!("Preparing keychain (a dialog may appear — please complete it)...");
+    let collection_path = match secrets_client::prepare_collection() {
+        Ok(p) => p,
+        Err(e) => {
+            // Restore mykey-secrets so secrets are not stranded before aborting.
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "start", "mykey-secrets"])
+                .status();
+            fatal_with_support(&format!("Could not prepare Secret Service collection: {e}"));
+        }
+    };
+    println!("✓ Keychain ready.");
 
     // Step 10 — Load MyKey secrets and restore
     let collections = storage::load_collections();
@@ -810,6 +815,7 @@ fn run_unenroll() {
         match daemon.unseal_secret(&item.sealed_value) {
             Ok(plaintext) => {
                 match secrets_client::write_secret_to_provider(
+                    &collection_path,
                     &item.label,
                     &item.attributes,
                     &plaintext,
@@ -896,6 +902,12 @@ fn run_unenroll() {
         Ok(_) => println!("✓ mykey-secrets autostart entry removed."),
         Err(e) => eprintln!("⚠ Could not remove autostart entry: {e}"),
     }
+
+    // Disable the mykey-secrets systemd user unit so it does not restart on next login.
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "mykey-secrets"])
+        .status();
+    println!("✓ mykey-secrets disabled.");
 
     println!();
     println!(
