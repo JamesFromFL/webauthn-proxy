@@ -26,7 +26,6 @@ const PROVIDER_DIR: &str = "/etc/mykey/provider";
 /// Detected Secret Service provider information (from live detection).
 pub struct ProviderInfo {
     pub process_name: String,
-    pub pid: u32,
     /// Systemd user service name, if detected via `systemctl --user status {pid}`.
     pub service_name: Option<String>,
     /// Best-guess package manager name for this provider.
@@ -43,6 +42,42 @@ pub struct ProviderInfoFile {
     pub package_name: String,
     pub keychain_path: Option<String>,
     pub keychain_deleted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    GnomeKeyring,
+    KWallet,
+    KeepassXC,
+    Generic,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceCollectionSpec {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DestinationPlan {
+    pub default_collection: OwnedObjectPath,
+    collection_by_source: HashMap<String, OwnedObjectPath>,
+}
+
+impl DestinationPlan {
+    pub fn collection_for_source(&self, source_collection_id: &str) -> &OwnedObjectPath {
+        self.collection_by_source
+            .get(source_collection_id)
+            .unwrap_or(&self.default_collection)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderSecretInfo {
+    pub collection_path: String,
+    pub label: String,
+    pub attributes: HashMap<String, String>,
+    pub content_type: String,
 }
 
 /// A secret item read from the source Secret Service provider.
@@ -166,6 +201,163 @@ pub fn ss_still_owned() -> bool {
     r.is_ok()
 }
 
+/// Return true if the process that owns `org.freedesktop.secrets` is `expected_process`.
+///
+/// Resolves the owning PID via `GetConnectionUnixProcessID`, then checks
+/// `/proc/{pid}/comm` (and `/proc/{pid}/exe` as a fallback) for the name.
+pub fn bus_owner_matches(expected_process: &str) -> bool {
+    let conn = match Connection::session() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let dbus = match dbus_proxy(&conn) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let owner: String = match dbus.call("GetNameOwner", &(SS_DEST,)) {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let pid: u32 = match dbus.call("GetConnectionUnixProcessID", &(owner.as_str(),)) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        if comm.trim().contains(expected_process) {
+            return true;
+        }
+    }
+    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        if let Some(name) = exe.file_name().and_then(|n| n.to_str()) {
+            return name.contains(expected_process);
+        }
+    }
+    false
+}
+
+fn provider_kind(process_name: &str) -> ProviderKind {
+    let lower = process_name.to_lowercase();
+    if lower.contains("gnome-keyring") {
+        ProviderKind::GnomeKeyring
+    } else if lower.contains("kwalletd") || lower.contains("kwallet") {
+        ProviderKind::KWallet
+    } else if lower.contains("keepassxc") {
+        ProviderKind::KeepassXC
+    } else {
+        ProviderKind::Generic
+    }
+}
+
+fn collection_label(conn: &Connection, path: &str) -> Option<String> {
+    get_string_prop(conn, path, COL_IFACE, "Label").ok()
+}
+
+fn collection_locked(conn: &Connection, path: &str) -> Option<bool> {
+    let proxy = props_proxy(conn, path).ok()?;
+    let val: OwnedValue = proxy.call("Get", &(COL_IFACE, "Locked")).ok()?;
+    bool::try_from(val).ok()
+}
+
+fn is_live_collection(conn: &Connection, path: &str) -> bool {
+    if path == "/" {
+        return false;
+    }
+    let proxy = match props_proxy(conn, path) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let label: Result<OwnedValue, _> = proxy.call("Get", &(COL_IFACE, "Label"));
+    if label.is_ok() {
+        return true;
+    }
+    let items: Result<OwnedValue, _> = proxy.call("Get", &(COL_IFACE, "Items"));
+    items.is_ok()
+}
+
+fn is_ready_collection(conn: &Connection, path: &str) -> bool {
+    is_live_collection(conn, path) && matches!(collection_locked(conn, path), Some(false))
+}
+
+fn unique_paths(paths: impl IntoIterator<Item = OwnedObjectPath>) -> Vec<OwnedObjectPath> {
+    let mut out: Vec<OwnedObjectPath> = Vec::new();
+    for path in paths {
+        if out.iter().all(|existing| existing.as_str() != path.as_str()) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn read_alias_path(conn: &Connection, alias: &str) -> Option<OwnedObjectPath> {
+    let svc = service_proxy(conn).ok()?;
+    let path: OwnedObjectPath = svc.call("ReadAlias", &(alias,)).ok()?;
+    (path.as_str() != "/").then_some(path)
+}
+
+fn list_reported_collections(conn: &Connection) -> Vec<OwnedObjectPath> {
+    get_object_paths_prop(conn, SS_PATH, SS_IFACE, "Collections").unwrap_or_default()
+}
+
+fn list_live_non_session_collections(conn: &Connection) -> Vec<OwnedObjectPath> {
+    unique_paths(
+        list_reported_collections(conn)
+            .into_iter()
+            .filter(|p| !p.as_str().ends_with("/session"))
+            .filter(|p| is_live_collection(conn, p.as_str())),
+    )
+}
+
+fn resolve_live_default_alias(conn: &Connection) -> Option<OwnedObjectPath> {
+    let path = read_alias_path(conn, "default")?;
+    if path.as_str().ends_with("/session") || !is_live_collection(conn, path.as_str()) {
+        return None;
+    }
+    Some(path)
+}
+
+fn find_live_collection_by_label(conn: &Connection, label: &str) -> Option<OwnedObjectPath> {
+    list_live_non_session_collections(conn)
+        .into_iter()
+        .find(|p| collection_label(conn, p.as_str()).as_deref() == Some(label))
+}
+
+fn wait_for_ready_collection(
+    conn: &Connection,
+    preferred_path: Option<&str>,
+    preferred_label: Option<&str>,
+    timeout_ms: u64,
+) -> Option<OwnedObjectPath> {
+    let attempts = std::cmp::max(1, timeout_ms / 250);
+    for _ in 0..attempts {
+        if let Some(path) = preferred_path {
+            if is_ready_collection(conn, path) {
+                return OwnedObjectPath::try_from(path).ok();
+            }
+        }
+        if let Some(label) = preferred_label {
+            if let Some(path) = find_live_collection_by_label(conn, label) {
+                if is_ready_collection(conn, path.as_str()) {
+                    return Some(path);
+                }
+            }
+        }
+        if preferred_path.is_none() && preferred_label.is_none() {
+            if let Some(path) = resolve_live_default_alias(conn) {
+                if is_ready_collection(conn, path.as_str()) {
+                    return Some(path);
+                }
+            }
+            for path in list_live_non_session_collections(conn) {
+                if is_ready_collection(conn, path.as_str()) {
+                    return Some(path);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Provider detection helpers
 // ---------------------------------------------------------------------------
@@ -219,7 +411,7 @@ fn package_name_for(process_name: &str) -> String {
     if lower.contains("gnome-keyring") {
         "gnome-keyring".to_string()
     } else if lower.contains("kwalletd5") {
-        "kwallet5".to_string()
+        "kwallet".to_string()
     } else if lower.contains("kwalletd6") || lower.contains("kwalletd") {
         "kwallet6".to_string()
     } else if lower.contains("keepassxc") {
@@ -282,7 +474,6 @@ pub fn detect_provider() -> Result<ProviderInfo, String> {
 
     Ok(ProviderInfo {
         process_name,
-        pid,
         service_name,
         package_name,
         keychain_path,
@@ -474,73 +665,153 @@ pub fn reinstall_provider(package_name: &str) -> Result<(), String> {
     }
 }
 
-/// Start the old provider and wait up to 10 seconds for it to claim the bus.
+/// Start the old provider and wait for it to claim `org.freedesktop.secrets`.
 ///
-/// Uses systemd if a service name is known; otherwise spawns the binary directly.
+/// Provider-specific paths are used because activation semantics differ
+/// substantially between gnome-keyring, KWallet, and KeePassXC.
+fn update_activation_environment() {
+    std::process::Command::new("dbus-update-activation-environment")
+        .args([
+            "--systemd",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "XDG_CURRENT_DESKTOP",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ])
+        .status()
+        .ok();
+}
+
+fn user_systemctl(args: &[&str]) {
+    std::process::Command::new("systemctl")
+        .args(["--user"])
+        .args(args)
+        .status()
+        .ok();
+}
+
+pub fn provider_ready(info: &ProviderInfoFile) -> bool {
+    match provider_kind(&info.process_name) {
+        ProviderKind::GnomeKeyring => bus_owner_matches("gnome-keyring-daemon"),
+        ProviderKind::KWallet => {
+            let conn = match session_bus() {
+                Ok(conn) => conn,
+                Err(_) => return false,
+            };
+            bus_owner_matches("kwalletd") && !list_live_non_session_collections(&conn).is_empty()
+        }
+        ProviderKind::KeepassXC => {
+            let conn = match session_bus() {
+                Ok(conn) => conn,
+                Err(_) => return false,
+            };
+            bus_owner_matches("keepassxc") && !list_live_non_session_collections(&conn).is_empty()
+        }
+        ProviderKind::Generic => bus_owner_matches(&info.process_name),
+    }
+}
+
 pub fn start_provider(info: &ProviderInfoFile) -> Result<(), String> {
-    if let Some(svc) = &info.service_name {
-        // Propagate display environment into the systemd user manager so that
-        // services started here (e.g. gnome-keyring-daemon) can spawn graphical
-        // helpers like gcr-prompter with the correct display context.
-        std::process::Command::new("dbus-update-activation-environment")
-            .args([
-                "--systemd",
-                "DISPLAY",
-                "WAYLAND_DISPLAY",
-                "XDG_RUNTIME_DIR",
-                "XDG_CURRENT_DESKTOP",
-                "DBUS_SESSION_BUS_ADDRESS",
-            ])
-            .status()
-            .ok();
-        std::process::Command::new("systemctl")
-            .args(["--user", "start", svc.as_str()])
-            .status()
-            .ok();
-        std::process::Command::new("systemctl")
-            .args(["--user", "enable", svc.as_str()])
-            .status()
-            .ok();
-    } else {
-        std::process::Command::new(&info.process_name)
-            .spawn()
-            .map_err(|e| format!("Failed to spawn {}: {e}", info.process_name))?;
+    let kind = provider_kind(&info.process_name);
+
+    user_systemctl(&["daemon-reload"]);
+    update_activation_environment();
+
+    match kind {
+        ProviderKind::GnomeKeyring => {
+            for unit in &["gnome-keyring-daemon.socket", "gnome-keyring-daemon.service"] {
+                user_systemctl(&["reset-failed", unit]);
+                user_systemctl(&["unmask", unit]);
+                user_systemctl(&["enable", unit]);
+            }
+            user_systemctl(&["restart", "gnome-keyring-daemon.socket"]);
+            user_systemctl(&["restart", "gnome-keyring-daemon.service"]);
+        }
+        ProviderKind::KWallet => {
+            let service_candidates = [
+                info.service_name.as_deref(),
+                Some("plasma-kwalletd.service"),
+                Some("kwalletd6.service"),
+                Some("kwalletd5.service"),
+            ];
+            for svc in service_candidates.into_iter().flatten() {
+                let socket = svc.replace(".service", ".socket");
+                user_systemctl(&["reset-failed", &socket]);
+                user_systemctl(&["reset-failed", svc]);
+                user_systemctl(&["unmask", &socket]);
+                user_systemctl(&["unmask", svc]);
+                user_systemctl(&["enable", &socket]);
+                user_systemctl(&["enable", svc]);
+                user_systemctl(&["restart", &socket]);
+                user_systemctl(&["restart", svc]);
+            }
+        }
+        ProviderKind::KeepassXC => {
+            std::process::Command::new("keepassxc").spawn().ok();
+            println!("KeePassXC requires manual setup:");
+            println!("1. Open KeePassXC");
+            println!("2. Enable Secret Service integration in settings");
+            println!("3. Open or create a database");
+            println!("4. Expose a group via Secret Service");
+        }
+        ProviderKind::Generic => {
+            if let Some(svc) = &info.service_name {
+                let socket = svc.replace(".service", ".socket");
+                user_systemctl(&["reset-failed", &socket]);
+                user_systemctl(&["reset-failed", svc.as_str()]);
+                user_systemctl(&["unmask", &socket]);
+                user_systemctl(&["unmask", svc.as_str()]);
+                user_systemctl(&["enable", &socket]);
+                user_systemctl(&["enable", svc.as_str()]);
+                user_systemctl(&["restart", &socket]);
+                user_systemctl(&["restart", svc.as_str()]);
+            } else {
+                std::process::Command::new(&info.process_name)
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn {}: {e}", info.process_name))?;
+            }
+        }
     }
 
-    // Poll every 500 ms for up to 10 seconds.
-    for _ in 0..20 {
-        std::thread::sleep(Duration::from_millis(500));
-        if ss_still_owned() {
+    let attempts = if kind == ProviderKind::KeepassXC { 120 } else { 20 };
+    let sleep_ms = if kind == ProviderKind::KeepassXC { 1000 } else { 500 };
+
+    for _ in 0..attempts {
+        std::thread::sleep(Duration::from_millis(sleep_ms));
+        if provider_ready(info) {
             return Ok(());
         }
     }
 
     Err(format!(
-        "{} did not claim org.freedesktop.secrets within 10 seconds",
+        "{} did not become ready for Secret Service restore",
         info.process_name
     ))
 }
 
-/// Write a single secret into a Secret Service collection.
-///
-/// `collection_path` must be a live, unlocked collection obtained from
-/// `prepare_collection()`.  Opens a plain session (the session bus is local
-/// and trusted) and calls `CreateItem` with `replace=true`.
-pub fn write_secret_to_provider(
+fn create_item_on_collection(
+    conn: &Connection,
     collection_path: &OwnedObjectPath,
     label: &str,
     attributes: &HashMap<String, String>,
     value: &[u8],
     content_type: &str,
-) -> Result<(), String> {
-    let conn = session_bus()?;
-    let svc = service_proxy(&conn)?;
+    replace: bool,
+) -> Result<OwnedObjectPath, String> {
+    if !is_live_collection(conn, collection_path.as_str()) {
+        return Err(format!(
+            "Collection {} is not a live Secret Service collection",
+            collection_path.as_str()
+        ));
+    }
 
+    let svc = service_proxy(conn)?;
     let (_, session_path): (OwnedValue, OwnedObjectPath) = svc
         .call("OpenSession", &("plain", Value::from("")))
         .map_err(|e| format!("OpenSession failed: {e}"))?;
 
-    let col_proxy = Proxy::new(&conn, SS_DEST, collection_path.as_str(), COL_IFACE)
+    let col_proxy = Proxy::new(conn, SS_DEST, collection_path.as_str(), COL_IFACE)
         .map_err(|e| format!("Collection proxy failed: {e}"))?;
 
     let mut props: HashMap<&str, Value<'_>> = HashMap::new();
@@ -552,22 +823,83 @@ pub fn write_secret_to_provider(
 
     let secret = (&session_path, Vec::<u8>::new(), value.to_vec(), content_type);
 
-    let _: (OwnedObjectPath, OwnedObjectPath) = col_proxy
-        .call("CreateItem", &(&props, &secret, true))
+    let (item_path, prompt): (OwnedObjectPath, OwnedObjectPath) = col_proxy
+        .call("CreateItem", &(&props, &secret, replace))
         .map_err(|e| format!("CreateItem failed: {e}"))?;
 
+    if item_path.as_str() != "/" {
+        return Ok(item_path);
+    }
+    if prompt.as_str() == "/" {
+        return Err("CreateItem returned neither an item nor a prompt".to_string());
+    }
+
+    let result = invoke_prompt_and_wait(conn, prompt.as_str())?;
+    OwnedObjectPath::try_from(result)
+        .map_err(|_| "CreateItem prompt result is not an ObjectPath".to_string())
+}
+
+fn delete_item_from_provider(conn: &Connection, item_path: &OwnedObjectPath) -> Result<(), String> {
+    let item_proxy = Proxy::new(conn, SS_DEST, item_path.as_str(), ITEM_IFACE)
+        .map_err(|e| format!("Item proxy failed: {e}"))?;
+    let prompt: OwnedObjectPath = item_proxy
+        .call("Delete", &())
+        .map_err(|e| format!("Delete failed: {e}"))?;
+
+    if prompt.as_str() != "/" {
+        invoke_prompt_and_wait(conn, prompt.as_str())?;
+    }
     Ok(())
 }
 
-/// List all (label, attributes) pairs from the running Secret Service provider.
+pub fn probe_collection_write(collection_path: &OwnedObjectPath) -> Result<(), String> {
+    let conn = session_bus()?;
+    let mut attrs = HashMap::new();
+    attrs.insert("mykey:migrate-probe".to_string(), uuid::Uuid::new_v4().to_string());
+    let item = create_item_on_collection(
+        &conn,
+        collection_path,
+        "MyKey migration probe",
+        &attrs,
+        b"probe",
+        "text/plain",
+        false,
+    )?;
+    delete_item_from_provider(&conn, &item)
+}
+
+/// Write a single secret into a Secret Service collection.
 ///
-/// Used during unenroll to detect which secrets are already in the old keychain
-/// so we can avoid writing duplicates.
-pub fn list_provider_secrets() -> Result<Vec<(String, HashMap<String, String>)>, String> {
+/// `collection_path` must be a live, unlocked collection obtained from
+/// `prepare_destination()`. The path is validated before each write to avoid
+/// blindly targeting stale alias paths.
+pub fn write_secret_to_provider(
+    collection_path: &OwnedObjectPath,
+    label: &str,
+    attributes: &HashMap<String, String>,
+    value: &[u8],
+    content_type: &str,
+) -> Result<(), String> {
+    let conn = session_bus()?;
+    let _ = create_item_on_collection(
+        &conn,
+        collection_path,
+        label,
+        attributes,
+        value,
+        content_type,
+        true,
+    )?;
+    Ok(())
+}
+
+/// List visible provider items with enough metadata to detect duplicates and
+/// verify restore placement.
+pub fn list_provider_secrets() -> Result<Vec<ProviderSecretInfo>, String> {
     let conn = session_bus()?;
     let svc = service_proxy(&conn)?;
 
-    let (_, _session_path): (OwnedValue, OwnedObjectPath) = svc
+    let (_, session_path): (OwnedValue, OwnedObjectPath) = svc
         .call("OpenSession", &("plain", Value::from("")))
         .map_err(|e| format!("OpenSession failed: {e}"))?;
 
@@ -587,7 +919,24 @@ pub fn list_provider_secrets() -> Result<Vec<(String, HashMap<String, String>)>,
             let item_str = item_path.as_str();
             let label = get_string_prop(&conn, item_str, ITEM_IFACE, "Label").unwrap_or_default();
             let attrs = get_attributes(&conn, item_str).unwrap_or_default();
-            result.push((label, attrs));
+            let content_type = Proxy::new(&conn, SS_DEST, item_str, ITEM_IFACE)
+                .ok()
+                .and_then(|proxy| {
+                    proxy
+                        .call::<_, _, (OwnedObjectPath, Vec<u8>, Vec<u8>, String)>(
+                            "GetSecret",
+                            &(&session_path,),
+                        )
+                        .ok()
+                        .map(|(_, _, _, content_type)| content_type)
+                })
+                .unwrap_or_default();
+            result.push(ProviderSecretInfo {
+                collection_path: col_str.to_string(),
+                label,
+                attributes: attrs,
+                content_type,
+            });
         }
     }
 
@@ -653,49 +1002,48 @@ fn stop_keepassxc() -> Result<(), String> {
     Ok(())
 }
 
-/// Stop a provider by uninstalling its package, then killing any surviving
-/// process, and verifying the bus name is released.
+/// Stop a provider via systemd and kill any surviving process.
+///
+/// gnome-keyring: stop and disable both the socket and service units (FIX 5).
+/// All others: stop, disable, and mask the service and its corresponding socket
+/// unit (FIX 9 — package removal is not used; it left socket units in bad state).
 fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
-    // Step 1 — Uninstall the package first.
-    // The process continues even if the package removal fails.
-    let id = detect_distro_id();
-    let uninstall_cmd: Option<Vec<&str>> = match id.as_deref() {
-        Some("arch") | Some("manjaro") => Some(vec![
-            "sudo", "pacman", "-Rns", "--noconfirm", info.package_name.as_str(),
-        ]),
-        Some("ubuntu") | Some("debian") => Some(vec![
-            "sudo", "apt-get", "remove", "-y", info.package_name.as_str(),
-        ]),
-        Some("fedora") => Some(vec![
-            "sudo", "dnf", "remove", "-y", info.package_name.as_str(),
-        ]),
-        Some("opensuse") | Some("opensuse-leap") | Some("opensuse-tumbleweed") => Some(vec![
-            "sudo", "zypper", "remove", "-y", info.package_name.as_str(),
-        ]),
-        other => {
-            eprintln!("[warn] Unknown distro {other:?} — skipping package uninstall");
-            None
-        }
-    };
+    let lower = info.process_name.to_lowercase();
 
-    if let Some(cmd) = uninstall_cmd {
-        match std::process::Command::new(cmd[0]).args(&cmd[1..]).status() {
-            Ok(s) if s.success() => {
-                eprintln!("[info] Package {} removed.", info.package_name);
-            }
-            Ok(s) => {
-                eprintln!(
-                    "[warn] Package removal for {} exited with {s} — continuing.",
-                    info.package_name
-                );
-            }
-            Err(e) => {
-                eprintln!("[warn] Failed to run package manager: {e} — continuing.");
-            }
+    if lower.contains("gnome-keyring") {
+        for unit in &["gnome-keyring-daemon.socket", "gnome-keyring-daemon.service"] {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "stop", unit])
+                .status();
         }
+        for unit in &["gnome-keyring-daemon.socket", "gnome-keyring-daemon.service"] {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "disable", unit])
+                .status();
+        }
+    } else if let Some(ref svc) = info.service_name {
+        let socket = svc.replace(".service", ".socket");
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "stop", &socket])
+            .status();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "stop", svc.as_str()])
+            .status();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", &socket])
+            .status();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", svc.as_str()])
+            .status();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "mask", &socket])
+            .status();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "mask", svc.as_str()])
+            .status();
     }
 
-    // Step 2 — Kill the process; it stays alive after package removal.
+    // Kill any surviving process.
     std::process::Command::new("pkill")
         .args(["-f", info.process_name.as_str()])
         .stderr(std::process::Stdio::null())
@@ -703,7 +1051,6 @@ fn stop_generic(info: &ProviderInfo) -> Result<(), String> {
         .ok();
     std::thread::sleep(Duration::from_secs(2));
 
-    // Step 3 — Verify the bus name has been released.
     if ss_still_owned() {
         Err(format!(
             "Could not stop {} — org.freedesktop.secrets is still owned",
@@ -737,50 +1084,9 @@ pub fn install_cmd_hint(package_name: &str) -> String {
     }
 }
 
-/// Return the distro-appropriate package removal command as a displayable string.
-pub fn uninstall_cmd_hint(package_name: &str) -> String {
-    match detect_distro_id().as_deref() {
-        Some("arch") | Some("manjaro") => {
-            format!("sudo pacman -Rns --noconfirm {package_name}")
-        }
-        Some("ubuntu") | Some("debian") => {
-            format!("sudo apt-get remove -y {package_name}")
-        }
-        Some("fedora") => {
-            format!("sudo dnf remove -y {package_name}")
-        }
-        Some("opensuse") | Some("opensuse-leap") | Some("opensuse-tumbleweed") => {
-            format!("sudo zypper remove -y {package_name}")
-        }
-        _ => format!("Uninstall {package_name} using your system package manager"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Autostart management
 // ---------------------------------------------------------------------------
-
-/// Install a XDG autostart entry so mykey-secrets launches on login.
-///
-/// Creates `~/.config/autostart/mykey-secrets.desktop`, creating the
-/// `~/.config/autostart/` directory if it does not exist.
-pub fn install_mykey_autostart() -> Result<(), String> {
-    let home = std::env::var("HOME")
-        .map_err(|_| "HOME environment variable not set".to_string())?;
-    let autostart_dir = std::path::Path::new(&home).join(".config/autostart");
-    std::fs::create_dir_all(&autostart_dir)
-        .map_err(|e| format!("Cannot create {}: {e}", autostart_dir.display()))?;
-    let desktop_path = autostart_dir.join("mykey-secrets.desktop");
-    let content = "[Desktop Entry]\n\
-                   Type=Application\n\
-                   Name=MyKey Secrets\n\
-                   Comment=MyKey TPM2-backed Secret Service provider\n\
-                   Exec=/usr/local/bin/mykey-secrets\n\
-                   Hidden=false\n\
-                   NoDisplay=true\n";
-    std::fs::write(&desktop_path, content)
-        .map_err(|e| format!("Cannot write {}: {e}", desktop_path.display()))
-}
 
 /// Remove the XDG autostart entry for mykey-secrets, if it exists.
 pub fn remove_mykey_autostart() -> Result<(), String> {
@@ -798,22 +1104,6 @@ pub fn remove_mykey_autostart() -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // prepare_collection — spec-correct collection setup for unenroll
 // ---------------------------------------------------------------------------
-
-/// Return true if the collection at `path` is currently locked.
-///
-/// Reads the `Locked` property from the `org.freedesktop.Secret.Collection`
-/// interface.  Returns `true` on any D-Bus error (conservative default).
-fn is_col_locked(conn: &Connection, path: &str) -> bool {
-    let proxy = match props_proxy(conn, path) {
-        Ok(p) => p,
-        Err(_) => return true,
-    };
-    let val: Result<OwnedValue, _> = proxy.call("Get", &(COL_IFACE, "Locked"));
-    match val {
-        Ok(v) => bool::try_from(v).unwrap_or(true),
-        Err(_) => true,
-    }
-}
 
 /// Invoke a Secret Service Prompt and block until `Prompt.Completed` fires.
 ///
@@ -880,7 +1170,7 @@ fn invoke_prompt_and_wait(conn: &Connection, prompt_path: &str) -> Result<OwnedV
     let prompt_proxy = Proxy::new(conn, SS_DEST, prompt_path, "org.freedesktop.Secret.Prompt")
         .map_err(|e| format!("Prompt proxy: {e}"))?;
     let _: () = prompt_proxy
-        .call("Prompt", &("0",))
+        .call("Prompt", &("",))
         .map_err(|e| format!("Prompt.Prompt: {e}"))?;
 
     // Block until Prompt.Completed arrives (60-second timeout for user interaction).
@@ -893,102 +1183,214 @@ fn invoke_prompt_and_wait(conn: &Connection, prompt_path: &str) -> Result<OwnedV
         })?
 }
 
-/// Ensure a collection is unlocked, invoking a Prompt if the provider requires one.
+fn invoke_prompt_and_wait_for_collection(
+    conn: &Connection,
+    prompt_path: &str,
+    preferred_path: Option<&str>,
+    preferred_label: Option<&str>,
+    timeout_ms: u64,
+) -> Result<OwnedObjectPath, String> {
+    let prompt_proxy = Proxy::new(conn, SS_DEST, prompt_path, "org.freedesktop.Secret.Prompt")
+        .map_err(|e| format!("Prompt proxy: {e}"))?;
+    let _: () = prompt_proxy
+        .call("Prompt", &("",))
+        .map_err(|e| format!("Prompt.Prompt: {e}"))?;
+
+    wait_for_ready_collection(conn, preferred_path, preferred_label, timeout_ms).ok_or_else(|| {
+        "Timed out waiting for keychain dialog (60 s). Run mykey-migrate --unenroll again."
+            .to_string()
+    })
+}
+
+/// Unlock a collection, invoking a Prompt if the provider requires one.
 fn ensure_unlocked_col(conn: &Connection, path: OwnedObjectPath) -> Result<OwnedObjectPath, String> {
-    if !is_col_locked(conn, path.as_str()) {
+    if !is_live_collection(conn, path.as_str()) {
+        return Err(format!(
+            "Collection {} is not a live Secret Service collection",
+            path.as_str()
+        ));
+    }
+
+    if matches!(collection_locked(conn, path.as_str()), Some(false)) {
         return Ok(path);
     }
 
+    let label = collection_label(conn, path.as_str());
     let svc = service_proxy(conn)?;
     let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = svc
         .call("Unlock", &(vec![path.clone()],))
         .map_err(|e| format!("Unlock failed: {e}"))?;
 
-    // prompt == "/" means Unlock succeeded immediately — no dialog needed.
-    // Only invoke the prompt flow when the provider explicitly requests one.
-    if prompt.as_str() == "/" {
-        return Ok(path);
+    if prompt.as_str() != "/" {
+        println!("  (If a dialog appears, please complete it — this will continue automatically.)");
+        return invoke_prompt_and_wait_for_collection(
+            conn,
+            prompt.as_str(),
+            Some(path.as_str()),
+            label.as_deref(),
+            60_000,
+        );
     }
 
-    println!("  (If a dialog appears, please complete it — this will continue automatically.)");
-    invoke_prompt_and_wait(conn, prompt.as_str())?;
-
-    if is_col_locked(conn, path.as_str()) {
-        Err(format!(
-            "Collection {} is still locked after Unlock",
+    wait_for_ready_collection(conn, Some(path.as_str()), label.as_deref(), 5000).ok_or_else(|| {
+        format!(
+            "Collection {} did not become a live, unlocked Secret Service collection",
             path.as_str()
-        ))
-    } else {
-        Ok(path)
+        )
+    })
+}
+
+fn supports_collection_creation(kind: ProviderKind) -> bool {
+    matches!(
+        kind,
+        ProviderKind::GnomeKeyring | ProviderKind::KWallet | ProviderKind::Generic
+    )
+}
+
+fn supports_multi_collection(kind: ProviderKind) -> bool {
+    matches!(kind, ProviderKind::GnomeKeyring | ProviderKind::KWallet)
+}
+
+fn default_collection_label(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::GnomeKeyring => "login",
+        ProviderKind::KWallet => "kdewallet",
+        ProviderKind::KeepassXC => "Secret Service",
+        ProviderKind::Generic => "login",
     }
 }
 
-/// Call `CreateCollection` and handle the Prompt, returning the new collection path.
-fn create_and_get_collection(conn: &Connection) -> Result<OwnedObjectPath, String> {
+/// Call `CreateCollection` and handle the Prompt, returning the live collection path.
+fn create_and_get_collection(
+    conn: &Connection,
+    label: &str,
+    alias: Option<&str>,
+) -> Result<OwnedObjectPath, String> {
     let svc = service_proxy(conn)?;
     let mut props: HashMap<&str, Value<'_>> = HashMap::new();
-    props.insert(
-        "org.freedesktop.Secret.Collection.Label",
-        Value::from("login"),
-    );
+    props.insert("org.freedesktop.Secret.Collection.Label", Value::from(label));
 
+    let alias = alias.unwrap_or("");
     let (col_path, prompt): (OwnedObjectPath, OwnedObjectPath) = svc
-        .call("CreateCollection", &(&props, "default"))
+        .call("CreateCollection", &(&props, alias))
         .map_err(|e| format!("CreateCollection failed: {e}"))?;
 
+    let mut preferred_path: Option<String> = None;
     if col_path.as_str() != "/" {
-        return Ok(col_path);
+        preferred_path = Some(col_path.as_str().to_string());
     }
-    if prompt.as_str() == "/" {
+
+    if prompt.as_str() != "/" {
+        println!("  (If a dialog appears, please complete it — this will continue automatically.)");
+        return invoke_prompt_and_wait_for_collection(
+            conn,
+            prompt.as_str(),
+            preferred_path.as_deref(),
+            Some(label),
+            60_000,
+        );
+    }
+
+    wait_for_ready_collection(conn, preferred_path.as_deref(), Some(label), 5000).ok_or_else(|| {
+        format!(
+            "Collection '{label}' was reported but never became a live Secret Service collection"
+        )
+    })
+}
+
+fn resolve_or_create_collection(
+    conn: &Connection,
+    kind: ProviderKind,
+    label: &str,
+    make_default_alias: bool,
+) -> Result<OwnedObjectPath, String> {
+    if make_default_alias {
+        if let Some(path) = resolve_live_default_alias(conn) {
+            return ensure_unlocked_col(conn, path);
+        }
+    }
+
+    if let Some(path) = find_live_collection_by_label(conn, label) {
+        return ensure_unlocked_col(conn, path);
+    }
+
+    if make_default_alias {
+        if let Some(path) = list_live_non_session_collections(conn).into_iter().next() {
+            return ensure_unlocked_col(conn, path);
+        }
+    }
+
+    if !supports_collection_creation(kind) {
         return Err(
-            "CreateCollection returned neither a collection nor a prompt. \
-             Try creating the keychain manually (e.g. via Passwords and Keys / seahorse)."
+            "No writable Secret Service collection is available. \
+             Open or create the destination keyring/wallet, then run mykey-migrate --unenroll again."
                 .to_string(),
         );
     }
 
-    println!("  (If a dialog appears, please complete it — this will continue automatically.)");
-    let result = invoke_prompt_and_wait(conn, prompt.as_str())?;
-
-    OwnedObjectPath::try_from(result)
-        .map_err(|_| "CreateCollection Completed result is not an ObjectPath".to_string())
+    let created = create_and_get_collection(
+        conn,
+        label,
+        if make_default_alias { Some("default") } else { None },
+    )?;
+    ensure_unlocked_col(conn, created)
 }
 
-/// Ensure there is a live, unlocked Secret Service collection and return its path.
-///
-/// Provider-agnostic flow per the Secret Service specification:
-/// 1. Try `ReadAlias("default")` — if valid and non-session, ensure it is unlocked.
-/// 2. Scan `GetCollections` for any non-session collection and unlock it.
-/// 3. If no collection exists at all, call `CreateCollection` to create one,
-///    handle the resulting Prompt, and return the new collection path.
-///
-/// Prompts are invoked via `invoke_prompt_and_wait`, which subscribes to
-/// `Prompt.Completed` before calling `Prompt.Prompt` so the signal is never
-/// missed, then blocks until the dialog completes (up to 60 seconds).
-pub fn prepare_collection() -> Result<OwnedObjectPath, String> {
+pub fn prepare_destination(
+    info: &ProviderInfoFile,
+    source_collections: &[SourceCollectionSpec],
+) -> Result<DestinationPlan, String> {
     let conn = session_bus()?;
-    let svc = service_proxy(&conn)?;
+    let kind = provider_kind(&info.process_name);
 
-    // 1. Try the default alias.
-    let alias: OwnedObjectPath = svc
-        .call("ReadAlias", &("default",))
-        .map_err(|e| format!("ReadAlias failed: {e}"))?;
+    let preferred_default_label = source_collections
+        .iter()
+        .find(|c| c.label.eq_ignore_ascii_case("login"))
+        .or_else(|| {
+            source_collections
+                .iter()
+                .find(|c| c.label.eq_ignore_ascii_case("default"))
+        })
+        .map(|c| c.label.as_str())
+        .unwrap_or(default_collection_label(kind));
 
-    if alias.as_str() != "/" && !alias.as_str().ends_with("/session") {
-        return ensure_unlocked_col(&conn, alias);
+    let default_collection =
+        resolve_or_create_collection(&conn, kind, preferred_default_label, true)?;
+
+    let mut collection_by_source = HashMap::new();
+    let mut probed_paths = std::collections::HashSet::new();
+
+    for source in source_collections {
+        let target = if supports_multi_collection(kind) {
+            let desired_label = if source.label.eq_ignore_ascii_case("default") {
+                preferred_default_label
+            } else {
+                source.label.as_str()
+            };
+
+            if desired_label == preferred_default_label {
+                default_collection.clone()
+            } else {
+                resolve_or_create_collection(&conn, kind, desired_label, false)?
+            }
+        } else {
+            default_collection.clone()
+        };
+
+        if probed_paths.insert(target.as_str().to_string()) {
+            probe_collection_write(&target)?;
+        }
+        collection_by_source.insert(source.id.clone(), target);
     }
 
-    // 2. Scan GetCollections.
-    let cols = get_object_paths_prop(&conn, SS_PATH, SS_IFACE, "Collections")?;
-    if let Some(col) = cols
-        .into_iter()
-        .find(|p| !p.as_str().ends_with("/session"))
-    {
-        return ensure_unlocked_col(&conn, col);
+    if probed_paths.is_empty() {
+        probe_collection_write(&default_collection)?;
     }
 
-    // 3. No collection exists — create one.
-    create_and_get_collection(&conn)
+    Ok(DestinationPlan {
+        default_collection,
+        collection_by_source,
+    })
 }
 
 /// Return true if `org.freedesktop.secrets` is currently owned by mykey-secrets.
@@ -1045,56 +1447,37 @@ pub fn find_installed_providers() -> Vec<String> {
 /// Start a provider by friendly name and wait up to 10 seconds for it to claim
 /// `org.freedesktop.secrets`.  KeePassXC is interactive.
 pub fn start_provider_by_name(name: &str) -> Result<(), String> {
-    match name {
-        "gnome-keyring" => {
-            std::process::Command::new("systemctl")
-                .args(["--user", "start", "gnome-keyring-daemon.service"])
-                .status()
-                .ok();
-            std::process::Command::new("systemctl")
-                .args(["--user", "start", "gnome-keyring-daemon.socket"])
-                .status()
-                .ok();
-        }
-        "kwalletd6" | "kwalletd5" => {
-            std::process::Command::new("systemctl")
-                .args(["--user", "start", "plasma-kwalletd.service"])
-                .status()
-                .ok();
-        }
-        "keepassxc" => {
-            println!("KeePassXC must be started manually.");
-            println!("  1. Open KeePassXC");
-            println!("  2. Go to Tools → Settings → Secret Service Integration");
-            println!("  3. Check 'Enable KeePassXC Secret Service integration'");
-            println!("  4. Click OK");
-            println!();
-            loop {
-                use std::io::Write as _;
-                print!("Press Enter once KeePassXC is running with Secret Service enabled: ");
-                std::io::stdout().flush().ok();
-                let mut line = String::new();
-                std::io::stdin().read_line(&mut line).ok();
-                if ss_still_owned() {
-                    return Ok(());
-                }
-                println!("org.freedesktop.secrets is not yet claimed — please complete the steps above.");
-            }
-        }
-        other => {
-            return Err(format!("Unknown provider name: {other}"));
-        }
-    }
+    let info = match name {
+        "gnome-keyring" => ProviderInfoFile {
+            process_name: "gnome-keyring-daemon".to_string(),
+            service_name: Some("gnome-keyring-daemon.service".to_string()),
+            package_name: "gnome-keyring".to_string(),
+            keychain_path: None,
+            keychain_deleted: false,
+        },
+        "kwalletd6" => ProviderInfoFile {
+            process_name: "kwalletd6".to_string(),
+            service_name: Some("plasma-kwalletd.service".to_string()),
+            package_name: "kwallet6".to_string(),
+            keychain_path: None,
+            keychain_deleted: false,
+        },
+        "kwalletd5" => ProviderInfoFile {
+            process_name: "kwalletd5".to_string(),
+            service_name: Some("kwalletd5.service".to_string()),
+            package_name: "kwallet".to_string(),
+            keychain_path: None,
+            keychain_deleted: false,
+        },
+        "keepassxc" => ProviderInfoFile {
+            process_name: "keepassxc".to_string(),
+            service_name: None,
+            package_name: "keepassxc".to_string(),
+            keychain_path: None,
+            keychain_deleted: false,
+        },
+        other => return Err(format!("Unknown provider name: {other}")),
+    };
 
-    // Poll every 500 ms for up to 10 seconds.
-    for _ in 0..20 {
-        std::thread::sleep(Duration::from_millis(500));
-        if ss_still_owned() {
-            return Ok(());
-        }
-    }
-
-    Err(format!(
-        "{name} did not claim org.freedesktop.secrets within 10 seconds"
-    ))
+    start_provider(&info)
 }

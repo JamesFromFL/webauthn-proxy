@@ -105,15 +105,3 @@ pub fn save_item(item: &StoredItem) -> Result<(), String> {
     std::fs::write(&path, data)
         .map_err(|e| format!("Cannot write {}: {e}", path.display()))
 }
-
-/// Delete an item from disk.
-pub fn delete_item(collection_id: &str, item_id: &str) -> Result<(), String> {
-    let path = std::path::Path::new(BASE_DIR)
-        .join(collection_id)
-        .join(format!("{item_id}.json"));
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|e| format!("Cannot delete {}: {e}", path.display()))?;
-    }
-    Ok(())
-}

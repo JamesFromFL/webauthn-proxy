@@ -260,7 +260,7 @@ fn do_migration(
     println!("  • Your original keychain will NOT be deleted (unless you choose to)");
     println!();
     println!(
-        "⚠ Your previous Secret Service provider ({}) will be removed and stopped. \
+        "⚠ Your previous Secret Service provider ({}) will be stopped so MyKey can take over. \
 You can restore it at any time by running: mykey-migrate --unenroll",
         info.process_name
     );
@@ -379,40 +379,29 @@ You can restore it at any time by running: mykey-migrate --unenroll",
         }
     }
 
-    // Stop old provider — two-stage pause_and_retry
+    // Stop old provider without uninstalling its package. Migration should
+    // manage runtime ownership of org.freedesktop.secrets, not remove software.
     println!();
     println!("Stopping {}...", info.process_name);
     if secrets_client::stop_provider(&info).is_err() {
-        let pkg_cmd = secrets_client::uninstall_cmd_hint(&info.package_name);
+        let stop_hint = if info.process_name.to_lowercase().contains("gnome-keyring") {
+            "systemctl --user stop gnome-keyring-daemon.socket gnome-keyring-daemon.service".to_string()
+        } else if let Some(ref svc) = info.service_name {
+            format!("systemctl --user stop {svc}")
+        } else {
+            format!("pkill -f {}", info.process_name)
+        };
 
-        // Stage 1: ask user to uninstall the package
-        let resolved = pause_and_retry(
-            &format!("Could not uninstall {}", info.package_name),
-            &pkg_cmd,
+        if !pause_and_retry(
+            &format!("Could not stop {}", info.process_name),
+            &stop_hint,
             || !secrets_client::ss_still_owned(),
             3,
-        );
-
-        // Stage 2: if package uninstall didn't free the bus, try killing the process
-        if !resolved {
-            let resolved2 = pause_and_retry(
-                &format!("{} is still running", info.process_name),
-                &format!("pkill -f {}", info.process_name),
-                || !secrets_client::ss_still_owned(),
-                3,
-            );
-            if !resolved2 {
-                fatal_with_support(&format!("Could not stop {}", info.process_name));
-            }
+        ) {
+            fatal_with_support(&format!("Could not stop {}", info.process_name));
         }
     }
     println!("✓ {} stopped.", info.process_name);
-
-    // Install autostart entry — warn only on failure
-    match secrets_client::install_mykey_autostart() {
-        Ok(_) => println!("✓ mykey-secrets autostart entry installed."),
-        Err(e) => eprintln!("⚠ Could not install autostart entry: {e}"),
-    }
 
     // Enable and start mykey-secrets
     println!("Enabling and starting mykey-secrets...");
@@ -677,7 +666,15 @@ fn run_unenroll() {
     let target_provider = match normalized {
         "1" => info.process_name.clone(),
         "2" => "gnome-keyring-daemon".to_string(),
-        "3" => "kwalletd6".to_string(),
+        "3" => {
+            if secrets_client::check_provider_installed("kwalletd6") {
+                "kwalletd6".to_string()
+            } else if secrets_client::check_provider_installed("kwalletd5") {
+                "kwalletd5".to_string()
+            } else {
+                "kwalletd6".to_string()
+            }
+        }
         "4" => "keepassxc".to_string(),
         _ => {
             eprintln!("Invalid selection.");
@@ -688,7 +685,8 @@ fn run_unenroll() {
     // Step 6 — Install if not present
     let package_name = match target_provider.as_str() {
         "gnome-keyring-daemon" => "gnome-keyring",
-        "kwalletd6" | "kwalletd5" => "kwallet6",
+        "kwalletd5" => "kwallet",
+        "kwalletd6" => "kwallet6",
         "keepassxc" => "keepassxc",
         _ => target_provider.as_str(),
     };
@@ -709,7 +707,7 @@ fn run_unenroll() {
         println!("✓ {} installed.", package_name);
     }
 
-    // Step 7 — Stop mykey-secrets
+    // Step 7 — Stop and quiesce mykey-secrets before handing the bus to the target (FIX 1).
     println!("Stopping mykey-secrets...");
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "stop", "mykey-secrets"])
@@ -724,6 +722,15 @@ fn run_unenroll() {
             fatal_with_support("mykey-secrets did not stop");
         }
     }
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "mykey-secrets"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "reset-failed", "mykey-secrets"])
+        .stderr(std::process::Stdio::null())
+        .status();
     println!("✓ mykey-secrets stopped.");
 
     // Step 8 — Start chosen provider
@@ -738,6 +745,7 @@ fn run_unenroll() {
         } else {
             match target_provider.as_str() {
                 "gnome-keyring-daemon" => Some("gnome-keyring-daemon.service".to_string()),
+                "kwalletd5" => Some("kwalletd5.service".to_string()),
                 "kwalletd6" => Some("plasma-kwalletd.service".to_string()),
                 _ => None,
             }
@@ -747,58 +755,115 @@ fn run_unenroll() {
         keychain_deleted: info.keychain_deleted,
     };
 
+    let rollback_mykey = || {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "reset-failed", "mykey-secrets"])
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "mykey-secrets"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "start", "mykey-secrets"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+
     if let Err(_) = secrets_client::start_provider(&tmp_info) {
         let svc_hint = tmp_info.service_name.as_deref()
             .map(|s| format!("systemctl --user start {s}"))
             .unwrap_or_else(|| format!("{} &", target_provider));
         if !pause_and_retry(
-            &format!("{target_provider} did not claim org.freedesktop.secrets"),
+            &format!("{target_provider} did not become ready for Secret Service restore"),
             &svc_hint,
-            || secrets_client::ss_still_owned() && !secrets_client::is_mykey_secrets_running(),
+            || secrets_client::provider_ready(&tmp_info),
             3,
         ) {
-            // Restart mykey-secrets to restore access before giving up
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "start", "mykey-secrets"])
-                .status();
+            rollback_mykey();
             fatal_with_support(&format!("Could not start {target_provider}"));
         }
     }
     println!("✓ {} is running", target_provider);
 
-    // Step 9 — Prepare the Secret Service collection (unlock existing or create new).
-    println!();
-    println!("Preparing keychain (a dialog may appear — please complete it)...");
-    let collection_path = match secrets_client::prepare_collection() {
-        Ok(p) => p,
-        Err(e) => {
-            // Restore mykey-secrets so secrets are not stranded before aborting.
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "start", "mykey-secrets"])
-                .status();
-            fatal_with_support(&format!("Could not prepare Secret Service collection: {e}"));
-        }
-    };
-    println!("✓ Keychain ready.");
-
-    // Step 10 — Load MyKey secrets and restore
+    // Step 9 — Load MyKey secrets and build the source collection map before
+    // preparing the destination. This lets the destination plan preserve
+    // collection layout where the target provider supports it.
     let collections = storage::load_collections();
+    let mut source_collections: Vec<secrets_client::SourceCollectionSpec> = Vec::new();
     let mut all_items: Vec<storage::StoredItem> = Vec::new();
     for col in &collections {
-        all_items.extend(storage::load_items(&col.id));
+        let items = storage::load_items(&col.id);
+        if !items.is_empty() {
+            source_collections.push(secrets_client::SourceCollectionSpec {
+                id: col.id.clone(),
+                label: col.label.clone(),
+            });
+        }
+        all_items.extend(items);
     }
+
+    // Step 10 — Prepare the destination keychain(s).
+    println!();
+    println!("Preparing destination keychain (a dialog may appear — please complete it)...");
+    let destination = match secrets_client::prepare_destination(&tmp_info, &source_collections) {
+        Ok(plan) => plan,
+        Err(e) => {
+            rollback_mykey();
+            fatal_with_support(&format!("Could not prepare destination keychain: {e}"));
+        }
+    };
+    println!("✓ Destination keychain ready.");
+
+    // Step 11 — Restore from MyKey into the validated destination.
     println!("Found {} secret(s) in MyKey storage.", all_items.len());
+
+    let fingerprint_parts = |collection_path: &str,
+                             label: &str,
+                             attributes: &std::collections::HashMap<String, String>,
+                             content_type: &str|
+     -> String {
+        let mut pairs: Vec<String> = attributes
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        pairs.sort();
+        format!(
+            "{collection_path}\x00{label}\x00{content_type}\x00{}",
+            pairs.join("\x00")
+        )
+    };
 
     let secrets_to_restore: Vec<&storage::StoredItem> = if info.keychain_deleted {
         println!("Old keychain was deleted — restoring all secrets.");
         all_items.iter().collect()
     } else {
         let existing = secrets_client::list_provider_secrets().unwrap_or_default();
-        let existing_labels: std::collections::HashSet<String> =
-            existing.into_iter().map(|(l, _)| l).collect();
+        // Dedup by destination collection + label + content type + sorted attributes.
+        let existing_fingerprints: std::collections::HashSet<String> = existing
+            .into_iter()
+            .map(|secret| {
+                fingerprint_parts(
+                    &secret.collection_path,
+                    &secret.label,
+                    &secret.attributes,
+                    &secret.content_type,
+                )
+            })
+            .collect();
+        let fingerprint = |item: &storage::StoredItem| -> String {
+            fingerprint_parts(
+                destination.collection_for_source(&item.collection_id).as_str(),
+                &item.label,
+                &item.attributes,
+                &item.content_type,
+            )
+        };
         let new_only: Vec<&storage::StoredItem> = all_items
             .iter()
-            .filter(|i| !existing_labels.contains(&i.label))
+            .filter(|i| !existing_fingerprints.contains(&fingerprint(i)))
             .collect();
         println!(
             "Restoring {} new secret(s) not in old keychain.",
@@ -809,13 +874,26 @@ fn run_unenroll() {
 
     let mut success = 0;
     let mut failed = 0;
+    let expected_fingerprint = |item: &storage::StoredItem| -> String {
+        fingerprint_parts(
+            destination.collection_for_source(&item.collection_id).as_str(),
+            &item.label,
+            &item.attributes,
+            &item.content_type,
+        )
+    };
+    let expected_after_restore: std::collections::HashSet<String> = secrets_to_restore
+        .iter()
+        .map(|item| expected_fingerprint(item))
+        .collect();
+
     for item in &secrets_to_restore {
         print!("Restoring: {}... ", item.label);
         flush_stdout();
         match daemon.unseal_secret(&item.sealed_value) {
             Ok(plaintext) => {
                 match secrets_client::write_secret_to_provider(
-                    &collection_path,
+                    destination.collection_for_source(&item.collection_id),
                     &item.label,
                     &item.attributes,
                     &plaintext,
@@ -838,7 +916,7 @@ fn run_unenroll() {
         }
     }
 
-    // Step 11 — Verify
+    // Step 12 — Verify writes before MyKey data is deleted.
     println!();
     println!(
         "Restore complete. Restored: {}  Failed: {}",
@@ -847,24 +925,49 @@ fn run_unenroll() {
 
     if failed > 0 {
         eprintln!("  Restarting mykey-secrets...");
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "start", "mykey-secrets"])
-            .status();
+        rollback_mykey();
         fatal_with_support(&format!(
             "{failed} secret(s) failed to restore to {target_provider}. \
              MyKey storage NOT deleted."
         ));
     }
 
-    // Step 12 — Ensure chosen provider is enabled for autostart
+    let provider_after_restore = secrets_client::list_provider_secrets().unwrap_or_default();
+    let actual_after_restore: std::collections::HashSet<String> = provider_after_restore
+        .into_iter()
+        .map(|secret| {
+            fingerprint_parts(
+                &secret.collection_path,
+                &secret.label,
+                &secret.attributes,
+                &secret.content_type,
+            )
+        })
+        .collect();
+    let missing: Vec<String> = expected_after_restore
+        .difference(&actual_after_restore)
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        rollback_mykey();
+        fatal_with_support(&format!(
+            "Post-restore verification failed: {} restored secret(s) are not visible in {target_provider}. \
+             MyKey storage NOT deleted.",
+            missing.len()
+        ));
+    }
+
+    println!("✓ Restore verified in {}.", target_provider);
+
+    // Step 13 — Ensure the chosen provider remains enabled for future logins.
     if let Some(ref svc) = tmp_info.service_name {
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "enable", svc.as_str()])
             .status();
-        println!("✓ {} enabled to start automatically.", target_provider);
     }
+    println!("✓ {} enabled to start automatically.", target_provider);
 
-    // Step 13 — Clean up MyKey storage
+    // Step 14 — Clean up MyKey storage
     // /etc/mykey/ is root-owned; use sudo for the removal.
     println!("Cleaning up MyKey storage...");
     let rm_ok = std::process::Command::new("sudo")
@@ -906,6 +1009,8 @@ fn run_unenroll() {
     // Disable the mykey-secrets systemd user unit so it does not restart on next login.
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "disable", "mykey-secrets"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
     println!("✓ mykey-secrets disabled.");
 
